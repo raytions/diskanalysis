@@ -5,6 +5,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from sqlalchemy import text
+from typing import List
 
 from app.db import get_db
 from app.schemas import ok
@@ -14,11 +15,11 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/settings")
 
 _SAFE = re.compile(r'^[a-zA-Z0-9_\-\.]+$')
+_SYSTEM_UID_MAX = 999  # uids <= this are considered system users
 
 
 @router.get("")
 def get_settings(db: Session = Depends(get_db)):
-    """Read all app-level settings and current custom_users count."""
     from app.services.analytics import get_path_attribution_enabled
     with db.bind.connect() as conn:
         path_attr = get_path_attribution_enabled(conn)
@@ -40,17 +41,20 @@ def update_settings(req: SettingRequest, request: Request, db: Session = Depends
     return ok({"path_user_attribution": req.path_user_attribution})
 
 
-class UserRequest(BaseModel):
-    username: str
-
-
 @router.get("/users")
 def list_custom_users(db: Session = Depends(get_db)):
     with db.bind.connect() as conn:
         rows = conn.execute(text(
-            "SELECT username, created_at FROM custom_users ORDER BY username"
+            "SELECT username, aliases, created_at FROM custom_users ORDER BY username"
         )).fetchall()
-    return ok({"items": [{"username": r[0], "created_at": r[1]} for r in rows], "total": len(rows)})
+    return ok({
+        "items": [{"username": r[0], "aliases": [a.strip() for a in (r[1] or "").split(",") if a.strip()], "created_at": r[2]} for r in rows],
+        "total": len(rows),
+    })
+
+
+class UserRequest(BaseModel):
+    username: str
 
 
 @router.post("/users")
@@ -63,24 +67,75 @@ def add_custom_user(req: UserRequest, request: Request, db: Session = Depends(ge
             existing = conn.execute(text("SELECT 1 FROM custom_users WHERE username=:u"), {"u": name}).fetchone()
             if existing:
                 return JSONResponse({"ok": False, "error": "User already exists"}, status_code=409)
-            conn.execute(text("INSERT INTO custom_users (username, created_at) VALUES (:u, datetime('now'))"), {"u": name})
+            conn.execute(text(
+                "INSERT INTO custom_users (username, aliases, created_at) VALUES (:u, '', datetime('now'))"
+            ), {"u": name})
             conn.commit()
         return ok({"username": name})
     except Exception as e:
         return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
 
 
-@router.delete("/users/{username}")
-def delete_custom_user(username: str, request: Request, db: Session = Depends(get_db), _=Depends(auth.require_admin)):
+class BulkDeleteRequest(BaseModel):
+    usernames: List[str]
+
+
+@router.delete("/users")
+def bulk_delete_users(req: BulkDeleteRequest, request: Request, db: Session = Depends(get_db), _=Depends(auth.require_admin)):
+    if not req.usernames:
+        return JSONResponse({"ok": False, "error": "No usernames provided"}, status_code=400)
     with db.bind.connect() as conn:
-        conn.execute(text("DELETE FROM custom_users WHERE username=:u"), {"u": username})
+        for name in req.usernames:
+            conn.execute(text("DELETE FROM custom_users WHERE username=:u"), {"u": name})
         conn.commit()
-    return ok({"deleted": username})
+    return ok({"deleted": len(req.usernames)})
+
+
+class AliasRequest(BaseModel):
+    names: List[str]   # all names to merge (must all exist or be valid)
+    primary: str       # canonical primary name (must be in names)
+
+
+@router.post("/users/alias")
+def set_user_alias(req: AliasRequest, request: Request, db: Session = Depends(get_db), _=Depends(auth.require_admin)):
+    if req.primary not in req.names:
+        return JSONResponse({"ok": False, "error": "primary must be one of the selected names"}, status_code=400)
+    if len(req.names) < 2:
+        return JSONResponse({"ok": False, "error": "Select at least 2 entries to alias"}, status_code=400)
+
+    aliases = [n for n in req.names if n != req.primary]
+    aliases_str = ",".join(aliases)
+
+    with db.bind.connect() as conn:
+        # Collect existing aliases of all merged entries so we don't lose them
+        existing_aliases: set[str] = set()
+        for name in req.names:
+            row = conn.execute(text("SELECT aliases FROM custom_users WHERE username=:u"), {"u": name}).fetchone()
+            if row and row[0]:
+                for a in row[0].split(","):
+                    a = a.strip()
+                    if a and a != req.primary and a not in req.names:
+                        existing_aliases.add(a)
+
+        all_aliases = list(existing_aliases) + aliases
+        final_aliases_str = ",".join(all_aliases)
+
+        # Upsert primary with combined aliases
+        conn.execute(text(
+            "INSERT INTO custom_users (username, aliases, created_at) VALUES (:u, :a, datetime('now')) "
+            "ON CONFLICT(username) DO UPDATE SET aliases=:a"
+        ), {"u": req.primary, "a": final_aliases_str})
+        # Remove alias entries (now represented under primary)
+        for alias in aliases:
+            conn.execute(text("DELETE FROM custom_users WHERE username=:u"), {"u": alias})
+        conn.commit()
+
+    return ok({"primary": req.primary, "aliases": all_aliases})
 
 
 @router.post("/users/sync")
 def sync_users_from_scans(request: Request, db: Session = Depends(get_db), _=Depends(auth.require_admin)):
-    """Collect all top-level directory names from latest scan data and add to custom_users."""
+    """Collect directory names from scan data + non-system /etc/passwd users."""
     import pwd
     from app.models import Mount
     from app.services.analytics import _latest_scan_id_for_mount
@@ -89,13 +144,13 @@ def sync_users_from_scans(request: Request, db: Session = Depends(get_db), _=Dep
     names: set[str] = set()
 
     with db.bind.connect() as conn:
+        # ── Scan-based directory names ────────────────────────────────────────
         for m in mounts:
             sid = _latest_scan_id_for_mount(db, m.id)
             if sid is None:
                 continue
             off = len(m.mount_point.rstrip('/')) + 2
 
-            # Top-level dirs from directories table
             rows = conn.execute(text(f"""
                 SELECT DISTINCT SUBSTR(path, {off}) AS comp
                 FROM directories
@@ -109,42 +164,51 @@ def sync_users_from_scans(request: Request, db: Session = Depends(get_db), _=Dep
                     if comp and _SAFE.match(comp):
                         names.add(comp)
             else:
-                # Fallback: first component from files table (GROUP BY, fast)
                 frows = conn.execute(text(f"""
                     SELECT
                         CASE
                             WHEN INSTR(SUBSTR(path, {off}), '/') = 0 THEN SUBSTR(path, {off})
                             ELSE SUBSTR(SUBSTR(path, {off}), 1, INSTR(SUBSTR(path, {off}), '/') - 1)
                         END AS comp
-                    FROM files
-                    WHERE mount_id={m.id} AND scan_id={sid}
+                    FROM files WHERE mount_id={m.id} AND scan_id={sid}
                     GROUP BY comp
                 """)).fetchall()
                 for (comp,) in frows:
                     if comp and _SAFE.match(comp):
                         names.add(comp)
 
-        # Also add users resolved from uid
+        # ── Non-system /etc/passwd users ──────────────────────────────────────
+        try:
+            for pw in pwd.getpwall():
+                if pw.pw_uid > _SYSTEM_UID_MAX and pw.pw_name and _SAFE.match(pw.pw_name):
+                    names.add(pw.pw_name)
+        except Exception:
+            pass
+
+        # ── Also uid-resolved names from files ────────────────────────────────
         uid_rows = conn.execute(text(
             "SELECT DISTINCT uid, MAX(username) FROM files WHERE uid IS NOT NULL GROUP BY uid"
         )).fetchall()
         for uid, stored in uid_rows:
-            if stored and _SAFE.match(stored):
-                names.add(stored)
-            elif uid is not None:
-                try:
-                    name = pwd.getpwuid(uid).pw_name
-                    if _SAFE.match(name):
-                        names.add(name)
-                except (KeyError, TypeError):
-                    pass
+            if uid is not None and uid > _SYSTEM_UID_MAX:
+                if stored and _SAFE.match(stored):
+                    names.add(stored)
+                else:
+                    try:
+                        n = pwd.getpwuid(uid).pw_name
+                        if _SAFE.match(n):
+                            names.add(n)
+                    except (KeyError, TypeError):
+                        pass
 
-        # Bulk insert — ignore conflicts
+        # ── Insert new names (skip existing) ─────────────────────────────────
         added = 0
         for name in sorted(names):
-            result = conn.execute(text("INSERT OR IGNORE INTO custom_users (username, created_at) VALUES (:u, datetime('now'))"), {"u": name})
+            result = conn.execute(text(
+                "INSERT OR IGNORE INTO custom_users (username, aliases, created_at) VALUES (:u, '', datetime('now'))"
+            ), {"u": name})
             added += result.rowcount
         conn.commit()
 
-    logger.info("Synced %d user candidates, added %d new entries to custom_users", len(names), added)
+    logger.info("Synced %d user candidates, added %d new to custom_users", len(names), added)
     return ok({"candidates": len(names), "added": added})

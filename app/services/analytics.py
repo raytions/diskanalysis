@@ -201,13 +201,15 @@ def get_path_attribution_enabled(conn) -> bool:
     return settings.PATH_USER_ATTRIBUTION
 
 
-def _collect_known_usernames(conn, where_sql: str) -> tuple[set, dict]:
+def _collect_known_usernames(conn, where_sql: str) -> tuple[set, dict, dict]:
     """
     Query distinct uids in the file set, resolve to real usernames.
-    Also includes names from the custom_users table.
-    Returns (known_usernames, uid_to_name).
-    known_usernames: safe real names used for path prefix matching.
-    uid_to_name: uid -> resolved name (including "uid:N" fallbacks).
+    Also includes names and aliases from the custom_users table.
+
+    Returns (known_names, uid_to_canonical, name_to_canonical):
+      known_names:      all primary names + aliases used for prefix matching
+      uid_to_canonical: uid -> canonical (primary) username
+      name_to_canonical: every name/alias -> its canonical primary username
     """
     import pwd
     import re
@@ -237,19 +239,32 @@ def _collect_known_usernames(conn, where_sql: str) -> tuple[set, dict]:
             except (KeyError, TypeError):
                 uid_to_name[uid] = f"uid:{uid}"
 
-    # Also include manually curated custom users from settings
+    # Build canonical mapping: each name maps to itself initially
+    name_to_canonical: dict = {n: n for n in known}
+
+    # Load custom_users: primary names + their aliases
     try:
-        cu_rows = conn.execute(sqlt("SELECT username FROM custom_users")).fetchall()
-        for (name,) in cu_rows:
-            if name and _SAFE.match(name):
-                known.add(name)
+        cu_rows = conn.execute(sqlt("SELECT username, aliases FROM custom_users")).fetchall()
+        for primary, aliases_str in cu_rows:
+            if not primary or not _SAFE.match(primary):
+                continue
+            known.add(primary)
+            name_to_canonical[primary] = primary
+            if aliases_str:
+                for alias in [a.strip() for a in aliases_str.split(',') if a.strip()]:
+                    if _SAFE.match(alias):
+                        known.add(alias)
+                        name_to_canonical[alias] = primary  # alias resolves to primary
     except Exception:
         pass
 
-    return known, uid_to_name
+    # Remap uid_to_name through canonical so uid lookups return primary names
+    uid_to_canonical = {uid: name_to_canonical.get(n, n) for uid, n in uid_to_name.items()}
+
+    return known, uid_to_canonical, name_to_canonical
 
 
-def _build_user_agg_per_mount(conn, mount_triples: list, known_usernames: set, uid_to_name: dict, path_attribution: bool = True) -> dict:
+def _build_user_agg_per_mount(conn, mount_triples: list, known_usernames: set, uid_to_name: dict, path_attribution: bool = True, name_to_canonical: dict | None = None) -> dict:
     """
     Attribute disk usage to users using a two-step strategy per mount:
 
@@ -319,8 +334,10 @@ def _build_user_agg_per_mount(conn, mount_triples: list, known_usernames: set, u
                         matched_name = name
                         break
                 if matched_name:
-                    agg[matched_name]["file_count"] += fc
-                    agg[matched_name]["total_size_bytes"] += ts
+                    # Resolve alias → canonical primary name
+                    bucket = name_to_canonical.get(matched_name, matched_name) if name_to_canonical else matched_name
+                    agg[bucket]["file_count"] += fc
+                    agg[bucket]["total_size_bytes"] += ts
                     matched_size += ts
                     matched_count += fc
 
@@ -370,9 +387,9 @@ def get_user_summary(
     where_sql = f"mount_id = {mount_id} AND scan_id = {scan_id}"
     with db.bind.connect() as conn:
         path_attr = get_path_attribution_enabled(conn)
-        known_usernames, uid_to_name = _collect_known_usernames(conn, where_sql)
-        agg = _build_user_agg_per_mount(conn, [(mount_id, scan_id, mount_point)], known_usernames, uid_to_name,
-                                        path_attribution=path_attr)
+        known_usernames, uid_to_canonical, name_to_canonical = _collect_known_usernames(conn, where_sql)
+        agg = _build_user_agg_per_mount(conn, [(mount_id, scan_id, mount_point)], known_usernames, uid_to_canonical,
+                                        path_attribution=path_attr, name_to_canonical=name_to_canonical)
 
     result = sorted(
         [{"uid": ",".join(sorted(v["uids"], key=lambda x: int(x) if x.isdigit() else 0)) or "—",

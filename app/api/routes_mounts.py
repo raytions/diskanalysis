@@ -143,11 +143,11 @@ def dashboard_overview_tab(
         # Collect known usernames (local passwd + custom_users) and check toggle
         with db.bind.connect() as conn:
             path_attr = get_path_attribution_enabled(conn)
-            known_usernames, uid_to_name = _collect_known_usernames(conn, f"scan_id IN ({sid_in})")
+            known_usernames, uid_to_canonical, name_to_canonical = _collect_known_usernames(conn, f"scan_id IN ({sid_in})")
         mount_triples = [(mid, sid, mount_map[str(mid)]) for mid, sid in mount_scan_pairs]
         with db.bind.connect() as conn:
-            agg = _build_user_agg_per_mount(conn, mount_triples, known_usernames, uid_to_name,
-                                            path_attribution=path_attr)
+            agg = _build_user_agg_per_mount(conn, mount_triples, known_usernames, uid_to_canonical,
+                                            path_attribution=path_attr, name_to_canonical=name_to_canonical)
         all_users = sorted(
             [{"username": n, "file_count": v["file_count"], "total_size_bytes": v["total_size_bytes"],
               "uids": ",".join(sorted(v["uids"], key=lambda x: int(x) if x.isdigit() else 0))}

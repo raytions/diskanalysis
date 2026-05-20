@@ -169,3 +169,10 @@ def _migrate(eng):
             )
         """))
         conn.commit()
+
+        # Add aliases column to custom_users if missing
+        cu_cols = {row[1] for row in conn.execute(text("PRAGMA table_info(custom_users)"))}
+        if "aliases" not in cu_cols:
+            conn.execute(text("ALTER TABLE custom_users ADD COLUMN aliases TEXT DEFAULT ''"))
+            conn.commit()
+            logger.info("Migrated: added custom_users.aliases column")
