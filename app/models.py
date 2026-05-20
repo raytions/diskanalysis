@@ -108,6 +108,14 @@ class Directory(Base):
     mount: Mapped["Mount | None"] = relationship("Mount", back_populates="directories")
 
 
+class CustomUser(Base):
+    __tablename__ = "custom_users"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    username: Mapped[str] = mapped_column(String, unique=True, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
 class ScanError(Base):
     __tablename__ = "scan_errors"
 

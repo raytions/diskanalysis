@@ -1,0 +1,248 @@
+{% extends "base.html" %}
+{% block title %}Settings — DiskAnalysis{% endblock %}
+
+{% block content %}
+{% set can_admin = (not auth_enabled) or is_admin %}
+<div class="page-header">
+  <h1>Settings</h1>
+</div>
+
+<div class="settings-layout">
+
+  <!-- ── User Attribution ───────────────────────────────── -->
+  <section class="card">
+    <h2>User Attribution</h2>
+    <p style="color:var(--text-dim);font-size:.87rem;margin-bottom:1rem;line-height:1.6;">
+      When enabled, files are attributed to users by matching the top-level directory name
+      against the user list below — before falling back to uid. This corrects NFS4 mounts
+      where all files share the same uid (e.g. uid=1024) regardless of actual owner.
+      <br>Example: <code>/media/NAS02/jiahao/</code> → <strong>jiahao</strong>, regardless of file uid.
+    </p>
+
+    {% if can_admin %}
+    <div class="setting-row">
+      <div>
+        <div class="setting-label">Path-based attribution</div>
+        <div class="setting-hint">Match directory names against the user list before uid fallback</div>
+      </div>
+      <label class="toggle-switch">
+        <input type="checkbox" id="path-attr-toggle" {% if path_user_attribution %}checked{% endif %}
+               onchange="saveToggle(this.checked)">
+        <span class="toggle-slider"></span>
+      </label>
+    </div>
+    <div id="toggle-msg" style="font-size:.82rem;margin-top:.4rem;min-height:1.2em;"></div>
+    {% else %}
+    <div class="setting-row">
+      <div>
+        <div class="setting-label">Path-based attribution</div>
+        <div class="setting-hint">{% if path_user_attribution %}Enabled{% else %}Disabled{% endif %} — log in as admin to change</div>
+      </div>
+      <span class="badge {% if path_user_attribution %}badge-completed{% else %}badge-stopped{% endif %}">
+        {% if path_user_attribution %}On{% else %}Off{% endif %}
+      </span>
+    </div>
+    {% endif %}
+  </section>
+
+  <!-- ── Custom User List ──────────────────────────────── -->
+  <section class="card">
+    <div style="display:flex;align-items:center;gap:.75rem;margin-bottom:.75rem;">
+      <h2 style="margin:0;">Custom User List</h2>
+      {% if can_admin %}
+      <button class="btn btn-sm" onclick="syncFromScans()" id="sync-btn">&#8635; Sync from scans</button>
+      {% endif %}
+    </div>
+    <p style="color:var(--text-dim);font-size:.85rem;margin-bottom:1rem;line-height:1.6;">
+      Add known usernames here. Directory attribution will prefix-match against this list
+      (e.g. adding <em>yyfang</em> matches <code>/yyfangspx/</code>, <code>/yyfang2023/</code>, etc.).
+      Changes take effect immediately — no restart needed.
+    </p>
+
+    {% if can_admin %}
+    <div style="display:flex;gap:.5rem;margin-bottom:1rem;">
+      <input type="text" id="new-user" placeholder="username" style="flex:1;max-width:260px;"
+             onkeydown="if(event.key==='Enter')addUser()" />
+      <button class="btn btn-primary btn-sm" onclick="addUser()">+ Add</button>
+    </div>
+    <div id="add-msg" style="font-size:.82rem;margin-bottom:.5rem;min-height:1.2em;"></div>
+    {% endif %}
+
+    <div id="user-list">
+      {% if users %}
+      <div class="table-wrapper">
+      <table class="data-table" id="users-table">
+        <thead><tr><th>Username</th><th>Added</th>{% if can_admin %}<th style="width:60px;"></th>{% endif %}</tr></thead>
+        <tbody id="users-tbody">
+          {% for u in users %}
+          <tr id="row-{{ u.username }}">
+            <td><code>{{ u.username }}</code></td>
+            <td class="dimmed" style="font-size:.8rem;">{{ u.created_at or '—' }}</td>
+            {% if can_admin %}
+            <td><button class="btn btn-danger btn-sm" onclick="deleteUser('{{ u.username }}')">×</button></td>
+            {% endif %}
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+      </div>
+      {% else %}
+      <p class="empty" id="empty-msg">No custom users yet. Add usernames above or use "Sync from scans".</p>
+      {% endif %}
+    </div>
+
+    <div id="sync-result" style="margin-top:.75rem;"></div>
+  </section>
+
+</div>
+
+<style>
+.settings-layout { display: flex; flex-direction: column; gap: 1.25rem; }
+.setting-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: .75rem 0;
+  border-top: 1px solid var(--border);
+}
+.setting-label { font-size: .9rem; font-weight: 500; }
+.setting-hint { font-size: .8rem; color: var(--text-dim); margin-top: .15rem; }
+
+/* Toggle switch */
+.toggle-switch { position: relative; display: inline-block; width: 40px; height: 22px; flex-shrink: 0; }
+.toggle-switch input { opacity: 0; width: 0; height: 0; }
+.toggle-slider {
+  position: absolute; inset: 0; cursor: pointer;
+  background: var(--border); border-radius: 22px; transition: .2s;
+}
+.toggle-slider::before {
+  content: ''; position: absolute;
+  height: 16px; width: 16px; left: 3px; bottom: 3px;
+  background: white; border-radius: 50%; transition: .2s;
+}
+.toggle-switch input:checked + .toggle-slider { background: var(--accent); }
+.toggle-switch input:checked + .toggle-slider::before { transform: translateX(18px); }
+</style>
+
+<script>
+async function saveToggle(enabled) {
+  const msg = document.getElementById('toggle-msg');
+  msg.textContent = 'Saving…';
+  msg.style.color = 'var(--text-dim)';
+  try {
+    const r = await fetch('/api/settings', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({path_user_attribution: enabled})
+    });
+    const j = await r.json();
+    if (j.ok) {
+      msg.textContent = enabled
+        ? '✓ Path attribution enabled. Reload the By User tab to see updated results.'
+        : '✓ Disabled. By User tab will use uid-only attribution.';
+      msg.style.color = 'var(--green)';
+    } else {
+      msg.textContent = '✗ ' + (j.error || 'Save failed');
+      msg.style.color = 'var(--danger)';
+    }
+  } catch(e) {
+    msg.textContent = '✗ Request failed: ' + e.message;
+    msg.style.color = 'var(--danger)';
+  }
+}
+
+async function addUser() {
+  const input = document.getElementById('new-user');
+  const name = input.value.trim();
+  const msg = document.getElementById('add-msg');
+  if (!name) return;
+  try {
+    const r = await fetch('/api/settings/users', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({username: name})
+    });
+    const j = await r.json();
+    if (j.ok) {
+      input.value = '';
+      msg.textContent = '✓ Added "' + name + '". Reload the By User tab to see results.';
+      msg.style.color = 'var(--green)';
+      appendUserRow(name);
+    } else {
+      msg.textContent = '✗ ' + (j.error || 'Add failed');
+      msg.style.color = 'var(--danger)';
+    }
+  } catch(e) {
+    msg.textContent = '✗ ' + e.message;
+    msg.style.color = 'var(--danger)';
+  }
+}
+
+function appendUserRow(name) {
+  const tbody = document.getElementById('users-tbody');
+  const empty = document.getElementById('empty-msg');
+  if (empty) empty.remove();
+  if (!tbody) {
+    // Table didn't exist yet — reload page to show it
+    location.reload();
+    return;
+  }
+  const tr = document.createElement('tr');
+  tr.id = 'row-' + name;
+  tr.innerHTML = `
+    <td><code>${esc(name)}</code></td>
+    <td class="dimmed" style="font-size:.8rem;">just now</td>
+    <td><button class="btn btn-danger btn-sm" onclick="deleteUser('${esc(name)}')">×</button></td>
+  `;
+  tbody.appendChild(tr);
+}
+
+async function deleteUser(name) {
+  if (!confirm('Remove "' + name + '" from user list?')) return;
+  try {
+    const r = await fetch('/api/settings/users/' + encodeURIComponent(name), {method:'DELETE'});
+    const j = await r.json();
+    if (j.ok) {
+      const row = document.getElementById('row-' + name);
+      if (row) row.remove();
+    } else {
+      alert('Error: ' + (j.error || 'Delete failed'));
+    }
+  } catch(e) {
+    alert('Request failed: ' + e.message);
+  }
+}
+
+async function syncFromScans() {
+  const btn = document.getElementById('sync-btn');
+  const res = document.getElementById('sync-result');
+  btn.disabled = true;
+  btn.textContent = '⏳ Syncing…';
+  res.innerHTML = '';
+  try {
+    const r = await fetch('/api/settings/users/sync', {method:'POST'});
+    const j = await r.json();
+    if (j.ok) {
+      const {candidates, added} = j.data;
+      res.innerHTML = `<div class="success-banner">
+        ✓ Found ${candidates} unique directory names — added ${added} new entries to user list.
+        Review the list and remove any that are not real users (e.g. dataset names).
+        Then reload the By User tab.
+      </div>`;
+      if (added > 0) setTimeout(() => location.reload(), 2000);
+    } else {
+      res.innerHTML = `<div class="error-banner">✗ ${j.error || 'Sync failed'}</div>`;
+    }
+  } catch(e) {
+    res.innerHTML = `<div class="error-banner">✗ ${e.message}</div>`;
+  }
+  btn.disabled = false;
+  btn.textContent = '↻ Sync from scans';
+}
+
+function esc(s) {
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+</script>
+{% endblock %}

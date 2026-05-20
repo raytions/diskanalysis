@@ -138,6 +138,21 @@ def scan_detail_page(request: Request, scan_id: int, db: Session = Depends(get_d
     return _tr(request, "scan_detail.html", {"scan": scan, "errors": errors})
 
 
+@router.get("/settings", response_class=HTMLResponse)
+def settings_page(request: Request, db: Session = Depends(get_db)):
+    from sqlalchemy import text
+    from app.services.analytics import get_path_attribution_enabled
+    with db.bind.connect() as conn:
+        path_attr = get_path_attribution_enabled(conn)
+        users = conn.execute(text(
+            "SELECT username, created_at FROM custom_users ORDER BY username"
+        )).fetchall()
+    return _tr(request, "settings.html", {
+        "path_user_attribution": path_attr,
+        "users": [{"username": r[0], "created_at": r[1]} for r in users],
+    })
+
+
 @router.get("/trigger", response_class=HTMLResponse)
 def trigger_page(request: Request):
     return RedirectResponse("/scans", status_code=302)

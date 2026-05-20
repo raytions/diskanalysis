@@ -139,16 +139,15 @@ def dashboard_overview_tab(
                  for r in rows]
 
     elif tab == "users":
-        from app.services.analytics import _build_user_agg_per_mount
-        from app.config import settings
-        # Collect known usernames from uid resolution across all mounts
+        from app.services.analytics import _build_user_agg_per_mount, get_path_attribution_enabled
+        # Collect known usernames (local passwd + custom_users) and check toggle
         with db.bind.connect() as conn:
+            path_attr = get_path_attribution_enabled(conn)
             known_usernames, uid_to_name = _collect_known_usernames(conn, f"scan_id IN ({sid_in})")
-        # Build triples including mount_point for first-component matching
         mount_triples = [(mid, sid, mount_map[str(mid)]) for mid, sid in mount_scan_pairs]
         with db.bind.connect() as conn:
             agg = _build_user_agg_per_mount(conn, mount_triples, known_usernames, uid_to_name,
-                                            path_attribution=settings.PATH_USER_ATTRIBUTION)
+                                            path_attribution=path_attr)
         all_users = sorted(
             [{"username": n, "file_count": v["file_count"], "total_size_bytes": v["total_size_bytes"],
               "uids": ",".join(sorted(v["uids"], key=lambda x: int(x) if x.isdigit() else 0))}

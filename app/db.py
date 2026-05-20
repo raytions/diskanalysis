@@ -150,3 +150,22 @@ def _migrate(eng):
             conn.execute(text("CREATE INDEX IF NOT EXISTS ix_dirs_mount_scan_size ON directories (mount_id, scan_id, total_size_bytes DESC)"))
             conn.commit()
             logger.info("Migrated: added ix_dirs_mount_scan_size index")
+
+        # Custom user list for path-based attribution
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS custom_users (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                username TEXT NOT NULL UNIQUE,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            )
+        """))
+        conn.commit()
+
+        # App-level settings (key-value)
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS app_settings (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            )
+        """))
+        conn.commit()

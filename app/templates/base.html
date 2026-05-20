@@ -16,6 +16,7 @@
     <li><a href="/" {% if request.url.path == "/" %}class="active"{% endif %}>Dashboard</a></li>
     <li><a href="/mounts" {% if "/mounts" in request.url.path and "/scans" not in request.url.path and "/trigger" not in request.url.path %}class="active"{% endif %}>Mounts</a></li>
     <li><a href="/scans" {% if "/scans" in request.url.path or "/trigger" in request.url.path %}class="active"{% endif %}>Scans</a></li>
+    <li><a href="/settings" {% if "/settings" in request.url.path %}class="active"{% endif %}>Settings</a></li>
   </ul>
   {% if not auth_enabled %}
     <span style="color:#86efac;font-size:.8rem;margin-right:.5rem;">&#10003; Admin</span>

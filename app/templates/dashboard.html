@@ -92,11 +92,11 @@
     <button class="tab-btn" onclick="switchDashTab('dupes',this)">Duplicates</button>
   </div>
 
-  <div id="dtab-files" style="padding-top:.75rem;"><p class="empty">Loading…</p></div>
-  <div id="dtab-dirs"  style="display:none;padding-top:.75rem;"><p class="empty">Loading…</p></div>
-  <div id="dtab-cold"  style="display:none;padding-top:.75rem;"><p class="empty">Loading…</p></div>
-  <div id="dtab-users" style="display:none;padding-top:.75rem;"><p class="empty">Loading…</p></div>
-  <div id="dtab-dupes" style="display:none;padding-top:.75rem;"><p class="empty">Loading…</p></div>
+  <div id="dtab-files" style="padding-top:.75rem;"><p class="tab-loading">Loading…</p></div>
+  <div id="dtab-dirs"  style="display:none;padding-top:.75rem;"><p class="tab-loading">Loading…</p></div>
+  <div id="dtab-cold"  style="display:none;padding-top:.75rem;"><p class="tab-loading">Loading…</p></div>
+  <div id="dtab-users" style="display:none;padding-top:.75rem;"><p class="tab-loading">Loading…</p></div>
+  <div id="dtab-dupes" style="display:none;padding-top:.75rem;"><p class="tab-loading">Loading…</p></div>
 </section>
 
 <script>
@@ -120,7 +120,7 @@ async function loadTab(tab, offset) {
   const st = _tabState[tab];
   if (offset !== undefined) st.offset = offset;
   const container = document.getElementById('dtab-' + tab);
-  container.innerHTML = '<p class="empty">Loading…</p>';
+  container.innerHTML = '<p class="tab-loading">Loading…</p>';
   try {
     const r = await fetch(`/api/dashboard/overview-tab?tab=${tab}&limit=${st.limit}&offset=${st.offset}`);
     const j = await r.json();
@@ -285,6 +285,7 @@ window.addEventListener('load', () => loadTab('files'));
 .pager-center { display: flex; align-items: center; gap: .5rem; }
 .pager-side { flex: 1; }
 .pager-side-right { display: flex; justify-content: flex-end; }
+.tab-loading { color: var(--text-dim); padding: 1.5rem 0; font-style: italic; text-align: center; }
 .tab-pager button {
   background: var(--surface2);
   border: 1px solid var(--border);

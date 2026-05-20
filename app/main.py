@@ -59,8 +59,10 @@ app.mount("/static", StaticFiles(directory="app/static"), name="static")
 
 from app.api.routes_mounts import router as mounts_router
 from app.api.routes_scans import router as scans_router
+from app.api.routes_settings import router as settings_router
 from app.web.routes_pages import router as pages_router
 
 app.include_router(mounts_router)
 app.include_router(scans_router)
+app.include_router(settings_router)
 app.include_router(pages_router)

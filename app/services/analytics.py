@@ -186,11 +186,27 @@ def get_extension_summary(
     ]
 
 
+def get_path_attribution_enabled(conn) -> bool:
+    """Read path_user_attribution toggle from app_settings table, fall back to config."""
+    try:
+        from sqlalchemy import text as sqlt
+        row = conn.execute(sqlt(
+            "SELECT value FROM app_settings WHERE key='path_user_attribution'"
+        )).fetchone()
+        if row is not None:
+            return str(row[0]).lower() in ('true', '1', 'yes')
+    except Exception:
+        pass
+    from app.config import settings
+    return settings.PATH_USER_ATTRIBUTION
+
+
 def _collect_known_usernames(conn, where_sql: str) -> tuple[set, dict]:
     """
     Query distinct uids in the file set, resolve to real usernames.
+    Also includes names from the custom_users table.
     Returns (known_usernames, uid_to_name).
-    known_usernames: safe real names used for path LIKE matching.
+    known_usernames: safe real names used for path prefix matching.
     uid_to_name: uid -> resolved name (including "uid:N" fallbacks).
     """
     import pwd
@@ -220,6 +236,15 @@ def _collect_known_usernames(conn, where_sql: str) -> tuple[set, dict]:
                     uid_to_name[uid] = f"uid:{uid}"
             except (KeyError, TypeError):
                 uid_to_name[uid] = f"uid:{uid}"
+
+    # Also include manually curated custom users from settings
+    try:
+        cu_rows = conn.execute(sqlt("SELECT username FROM custom_users")).fetchall()
+        for (name,) in cu_rows:
+            if name and _SAFE.match(name):
+                known.add(name)
+    except Exception:
+        pass
 
     return known, uid_to_name
 
@@ -285,21 +310,19 @@ def _build_user_agg_per_mount(conn, mount_triples: list, known_usernames: set, u
                     continue
                 ts = ts or 0
                 fc = fc or 0
-                # Try prefix-match against known usernames (e.g. yyfangspx → yyfang).
+                # Only attribute to a bucket if the directory name prefix-matches a
+                # known username (local passwd + custom_users list). Unmatched dirs
+                # (datasets, shared dirs, etc.) fall through to the uid fallback below.
                 matched_name = None
                 for name in sorted_names:
                     if comp.lower().startswith(name.lower()):
                         matched_name = name
                         break
-                # If no known user matches, use the directory name itself as the bucket
-                # so NAS dirs like /media/NAS02/jiahao/ become "jiahao" instead of
-                # collapsing into the uid=1024 "ula" bucket.
-                if matched_name is None:
-                    matched_name = comp
-                agg[matched_name]["file_count"] += fc
-                agg[matched_name]["total_size_bytes"] += ts
-                matched_size += ts
-                matched_count += fc
+                if matched_name:
+                    agg[matched_name]["file_count"] += fc
+                    agg[matched_name]["total_size_bytes"] += ts
+                    matched_size += ts
+                    matched_count += fc
 
         # ── Step 2: uid-based attribution for unmatched portion ───────────────────────
         # Get uid totals for the whole mount (fast: GROUP BY uid with covering index).
@@ -345,11 +368,11 @@ def get_user_summary(
     mount_point = mount.mount_point if mount else ""
 
     where_sql = f"mount_id = {mount_id} AND scan_id = {scan_id}"
-    from app.config import settings
     with db.bind.connect() as conn:
+        path_attr = get_path_attribution_enabled(conn)
         known_usernames, uid_to_name = _collect_known_usernames(conn, where_sql)
         agg = _build_user_agg_per_mount(conn, [(mount_id, scan_id, mount_point)], known_usernames, uid_to_name,
-                                        path_attribution=settings.PATH_USER_ATTRIBUTION)
+                                        path_attribution=path_attr)
 
     result = sorted(
         [{"uid": ",".join(sorted(v["uids"], key=lambda x: int(x) if x.isdigit() else 0)) or "—",
