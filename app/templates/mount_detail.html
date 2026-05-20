@@ -10,16 +10,52 @@
       <code>{{ mount.device }}</code>
       <span class="badge">{{ mount.fs_type }}</span>
       {% if mount.is_network_fs %}<span class="badge badge-net">Network</span>{% endif %}
-      {% if not mount.is_accessible %}<span class="badge badge-danger">Inaccessible</span>{% endif %}
+      <span id="mount-state-badge" class="badge" style="display:none;"></span>
     </div>
   </div>
   <div class="header-actions">
     <button id="scan-this-btn" class="btn btn-primary" onclick="scanThis()">&#9654; Scan This</button>
     {% if not auth_enabled or is_admin %}
-    <button class="btn" id="unmount-btn" onclick="unmountThis()">Unmount</button>
+    <button class="btn" id="mount-action-btn" onclick="mountActionClick()" style="min-width:90px;">…</button>
     {% endif %}
     <a href="/api/exports/mounts/{{ mount.id }}.json" class="btn">JSON</a>
     <a href="/api/exports/mounts/{{ mount.id }}.csv" class="btn">CSV</a>
+  </div>
+</div>
+
+<!-- Remount panel (shown when not mounted) -->
+<div id="remount-panel" class="card" style="display:none;margin-bottom:1rem;">
+  <div id="remount-ssh" style="display:none;">
+    <h3 style="font-size:.95rem;margin-bottom:.75rem;">Re-mount via SSH (sshfs)</h3>
+    <div style="display:flex;flex-wrap:wrap;gap:.5rem;align-items:center;margin-bottom:.6rem;">
+      <code style="font-size:.83rem;color:var(--text-dim);">{{ mount.device }}</code>
+      <span style="font-size:.83rem;color:var(--text-dim);">→</span>
+      <code style="font-size:.83rem;">{{ mount.mount_point }}</code>
+    </div>
+    <div style="display:flex;gap:.5rem;flex-wrap:wrap;align-items:center;margin-bottom:.5rem;">
+      <label style="font-size:.83rem;display:flex;align-items:center;gap:.3rem;">
+        <input type="radio" name="remount-auth" value="password" checked onchange="toggleRemountAuth()"> Password
+      </label>
+      <label style="font-size:.83rem;display:flex;align-items:center;gap:.3rem;">
+        <input type="radio" name="remount-auth" value="key" onchange="toggleRemountAuth()"> SSH Key
+      </label>
+    </div>
+    <div id="remount-pass-field" style="display:flex;gap:.5rem;margin-bottom:.6rem;">
+      <input type="password" id="remount-pass" placeholder="SSH password" class="settings-input" style="max-width:220px;">
+    </div>
+    <div id="remount-key-field" style="display:none;flex-direction:column;gap:.4rem;margin-bottom:.6rem;">
+      <input type="text" id="remount-keypath" placeholder="/home/user/.ssh/id_rsa" class="settings-input" style="max-width:320px;">
+    </div>
+    <div style="display:flex;gap:.5rem;align-items:center;">
+      <button class="btn btn-primary btn-sm" onclick="doRemountSSH()">Mount</button>
+      <span id="remount-msg" style="font-size:.83rem;"></span>
+    </div>
+  </div>
+  <div id="remount-cmd-panel" style="display:none;">
+    <h3 style="font-size:.95rem;margin-bottom:.5rem;">Mount command</h3>
+    <p style="font-size:.83rem;color:var(--text-dim);margin-bottom:.5rem;">This filesystem type requires a system-level mount command. Run this on the server:</p>
+    <pre id="remount-cmd-text" style="background:var(--surface2);border:1px solid var(--border);border-radius:4px;padding:.45rem .7rem;font-size:.79rem;white-space:pre-wrap;word-break:break-all;cursor:pointer;margin:0;" title="Click to copy" onclick="copyRemountCmd()"></pre>
+    <div id="remount-copy-hint" style="font-size:.72rem;color:var(--text-dim);margin-top:.2rem;display:none;">Copied!</div>
   </div>
 </div>
 
@@ -101,6 +137,8 @@
 <div id="tab-history" class="tab-content"></div>
 
 <style>
+.settings-input { padding:.35rem .6rem; border:1px solid var(--border); border-radius:var(--radius); background:var(--surface); color:var(--text); font-size:.87rem; font-family:inherit; }
+.settings-input:focus { outline:2px solid var(--accent); outline-offset:-1px; }
 .pagination { display:flex; gap:.4rem; align-items:center; justify-content:center; margin-top:.75rem; font-size:.85rem; flex-wrap:wrap; }
 .pagination button { padding:.25rem .65rem; border:1px solid var(--border); border-radius:4px; background:var(--surface); color:var(--text); cursor:pointer; font-size:.82rem; }
 .pagination button:disabled { opacity:.35; cursor:default; }
@@ -114,6 +152,9 @@
 <script>
 const MOUNT_ID = {{ mount.id }};
 const IS_ADMIN = {{ 'true' if (is_admin or not auth_enabled) else 'false' }};
+const MOUNT_POINT = {{ mount.mount_point | tojson }};
+const MOUNT_FS_TYPE = {{ mount.fs_type | tojson }};
+const MOUNT_DEVICE = {{ mount.device | tojson }};
 let currentTab = 'files';
 
 const tabState = {};
@@ -408,21 +449,150 @@ function showDelToast(msg) {
   setTimeout(() => { t.style.opacity = '0'; setTimeout(() => t.remove(), 400); }, 3600);
 }
 
-async function unmountThis() {
-  const btn = document.getElementById('unmount-btn');
+// ── Mount state ──────────────────────────────────────────
+let _isMounted = null;
+
+async function checkMountState() {
+  const btn = document.getElementById('mount-action-btn');
   if (!btn) return;
-  if (!confirm('Unmount {{ mount.mount_point }}?\n\nThis will disconnect the filesystem. Only works for mounts made by the same user as the web server.')) return;
+  try {
+    const r = await fetch('/api/mounts/test-path?path=' + encodeURIComponent(MOUNT_POINT));
+    const j = await r.json();
+    const d = j.data;
+    _isMounted = d.is_mounted || d.accessible;
+  } catch(e) {
+    _isMounted = true; // assume mounted if check fails
+  }
+  applyMountState();
+}
+
+function applyMountState() {
+  const btn = document.getElementById('mount-action-btn');
+  const badge = document.getElementById('mount-state-badge');
+  const panel = document.getElementById('remount-panel');
+  if (!btn) return;
+  if (_isMounted) {
+    btn.textContent = 'Unmount';
+    btn.className = 'btn';
+    btn.disabled = false;
+    if (badge) badge.style.display = 'none';
+    if (panel) panel.style.display = 'none';
+  } else {
+    btn.textContent = 'Mount';
+    btn.className = 'btn btn-primary';
+    btn.disabled = false;
+    if (badge) { badge.textContent = 'Not Mounted'; badge.className = 'badge badge-danger'; badge.style.display = ''; }
+    if (panel) showRemountPanel();
+  }
+}
+
+function showRemountPanel() {
+  const panel = document.getElementById('remount-panel');
+  if (!panel) return;
+  panel.style.display = '';
+  const sshDiv = document.getElementById('remount-ssh');
+  const cmdDiv = document.getElementById('remount-cmd-panel');
+  if (MOUNT_FS_TYPE === 'fuse.sshfs') {
+    sshDiv.style.display = ''; cmdDiv.style.display = 'none';
+  } else {
+    sshDiv.style.display = 'none'; cmdDiv.style.display = '';
+    // Build a representative mount command for the fs type
+    const cmd = buildMountCmd();
+    const pre = document.getElementById('remount-cmd-text');
+    if (pre) pre.textContent = cmd;
+  }
+}
+
+function buildMountCmd() {
+  const ft = MOUNT_FS_TYPE, mp = MOUNT_POINT, dev = MOUNT_DEVICE;
+  if (['nfs4','nfs'].includes(ft)) return `sudo mount -t ${ft} ${dev} ${mp}`;
+  if (['cifs','smb3'].includes(ft)) return `sudo mount -t cifs ${dev} ${mp} -o username=YOUR_USER`;
+  return `sudo mount -t ${ft} ${dev} ${mp}`;
+}
+
+function copyRemountCmd() {
+  const text = document.getElementById('remount-cmd-text')?.textContent;
+  if (!text) return;
+  navigator.clipboard.writeText(text).then(() => {
+    const hint = document.getElementById('remount-copy-hint');
+    if (hint) { hint.style.display = 'block'; setTimeout(() => { hint.style.display = 'none'; }, 1500); }
+  });
+}
+
+function mountActionClick() {
+  if (_isMounted) {
+    unmountThis();
+  } else {
+    if (MOUNT_FS_TYPE === 'fuse.sshfs') {
+      showRemountPanel();
+      document.getElementById('remount-pass')?.focus();
+    } else {
+      showRemountPanel();
+    }
+  }
+}
+
+function toggleRemountAuth() {
+  const isKey = document.querySelector('input[name="remount-auth"]:checked')?.value === 'key';
+  document.getElementById('remount-pass-field').style.display = isKey ? 'none' : 'flex';
+  document.getElementById('remount-key-field').style.display = isKey ? 'flex' : 'none';
+}
+
+async function doRemountSSH() {
+  const authType = document.querySelector('input[name="remount-auth"]:checked')?.value || 'password';
+  const password = authType === 'password' ? (document.getElementById('remount-pass')?.value || '') : '';
+  const keyPath = authType === 'key' ? (document.getElementById('remount-keypath')?.value?.trim() || '') : '';
+  const msg = document.getElementById('remount-msg');
+
+  // Parse device: user@host:/path
+  let username = '', host = '', remotePath = '/';
+  const atIdx = MOUNT_DEVICE.indexOf('@');
+  if (atIdx > -1) {
+    username = MOUNT_DEVICE.slice(0, atIdx);
+    const rest = MOUNT_DEVICE.slice(atIdx + 1);
+    const colonIdx = rest.indexOf(':');
+    if (colonIdx > -1) { host = rest.slice(0, colonIdx); remotePath = rest.slice(colonIdx + 1) || '/'; }
+    else { host = rest; }
+  }
+
+  if (!username || !host) { msg.style.color='var(--danger)'; msg.textContent = '✗ Cannot parse device: ' + MOUNT_DEVICE; return; }
+
+  msg.style.color = 'var(--text-dim)'; msg.textContent = 'Mounting…';
+  const btn = document.querySelector('#remount-ssh .btn');
+  if (btn) btn.disabled = true;
+  try {
+    const r = await fetch('/api/mounts/mount-ssh', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ username, host, remote_path: remotePath, local_path: MOUNT_POINT, port: 22, password, key_path: keyPath }),
+    });
+    const j = await r.json();
+    if (j.ok && (j.data.mounted || j.data.already)) {
+      msg.style.color = 'var(--green)'; msg.textContent = '✓ Mounted';
+      _isMounted = true;
+      setTimeout(() => { applyMountState(); location.reload(); }, 700);
+    } else {
+      const err = (j.data && j.data.error) || j.error || 'mount failed';
+      msg.style.color = 'var(--danger)'; msg.textContent = '✗ ' + err;
+      if (btn) btn.disabled = false;
+    }
+  } catch(e) { msg.style.color='var(--danger)'; msg.textContent = '✗ ' + e.message; if (btn) btn.disabled = false; }
+}
+
+async function unmountThis() {
+  const btn = document.getElementById('mount-action-btn');
+  if (!btn) return;
+  if (!confirm('Unmount ' + MOUNT_POINT + '?\n\nOnly works for mounts made by the same user as the web server.')) return;
   btn.disabled = true; btn.textContent = 'Unmounting…';
   try {
-    const r = await fetch('/api/mounts/{{ mount.id }}/unmount', {method:'POST'});
+    const r = await fetch('/api/mounts/' + MOUNT_ID + '/unmount', {method:'POST'});
     const j = await r.json();
-    if (j.data.unmounted) {
-      btn.textContent = '✓ Unmounted';
-      setTimeout(() => location.reload(), 800);
+    if (j.data && j.data.unmounted) {
+      _isMounted = false;
+      applyMountState();
     } else {
-      btn.textContent = 'Unmount';
-      btn.disabled = false;
-      alert('Unmount failed: ' + (j.data.error || 'unknown') + '\n\nFor root-mounted filesystems, run:\nsudo umount {{ mount.mount_point }}');
+      const err = (j.data && j.data.error) || 'unknown';
+      btn.disabled = false; btn.textContent = 'Unmount';
+      alert('Unmount failed: ' + err + '\n\nFor root-mounted filesystems, run:\nsudo umount ' + MOUNT_POINT);
     }
   } catch(e) { btn.disabled = false; btn.textContent = 'Unmount'; alert('Error: ' + e.message); }
 }
@@ -455,7 +625,8 @@ async function scanThis() {
   }
 }
 
-// Load first tab
+// Load first tab and check live mount state
 renderTab('files');
+if (IS_ADMIN) checkMountState();
 </script>
 {% endblock %}
