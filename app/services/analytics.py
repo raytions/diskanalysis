@@ -266,18 +266,19 @@ def _collect_known_usernames(conn, where_sql: str) -> tuple[set, dict, dict]:
 
 def _build_user_agg_per_mount(conn, mount_triples: list, known_usernames: set, uid_to_name: dict, path_attribution: bool = True, name_to_canonical: dict | None = None) -> dict:
     """
-    Attribute disk usage to users using a two-step strategy per mount:
+    Attribute disk usage to users using a two-step strategy per mount.
 
-    1. Directory-based path attribution (PRIMARY, fast):
-       Fetch top-level directories under each mount point from the *directories* table
-       (cumulative sizes). Prefix-match the directory name against known usernames.
-       Example: /media/NAS02/jiahao/ → jiahao, /media/hdd/yyfangspx/ → yyfang.
-       This handles NFS4 mounts where uid isolation is absent — the folder name is
-       authoritative regardless of file uid (e.g. uid=1024 colliding with local 'ula').
+    Each file is counted exactly once:
 
-    2. Uid-based attribution (FALLBACK):
-       Files not covered by any matched top-level directory are attributed by uid.
-       Distributed proportionally based on each uid's share of the mount's total size.
+    Step 1 — Directory path attribution (if enabled):
+      Match top-level directory names against known usernames. The entire directory
+      subtree (cumulative size from *directories* table) is attributed to the matched
+      user. Unmatched directories are left for Step 2.
+
+    Step 2 — Uid attribution for files NOT under any Step-1 matched directory:
+      Query uid totals only for files whose first path component was not matched in
+      Step 1. This prevents double-counting: e.g. uid=1024 files inside jiahao/ are
+      already counted under jiahao and must not also inflate ula's total.
 
     mount_triples: [(mount_id, scan_id, mount_point), ...]
     """
@@ -290,33 +291,34 @@ def _build_user_agg_per_mount(conn, mount_triples: list, known_usernames: set, u
     sorted_names = sorted((n for n in known_usernames if _SAFE.match(n)), key=len, reverse=True)
 
     for mount_id, scan_id, mount_point in mount_triples:
-        # rstrip('/') makes mount_point='/' → off=2 work correctly (avoids off-by-one)
         off = len(mount_point.rstrip('/')) + 2
+        # SQL expression: extract the first path component below the mount point.
+        first_comp = (
+            f"CASE WHEN INSTR(SUBSTR(path,{off}),'/')=0 "
+            f"THEN SUBSTR(path,{off}) "
+            f"ELSE SUBSTR(SUBSTR(path,{off}),1,INSTR(SUBSTR(path,{off}),'/')-1) END"
+        )
 
-        # ── Step 1: top-level directory path attribution (optional) ──────────────────
-        matched_size = matched_count = 0
+        # ── Step 1: top-level directory path attribution ──────────────────────
+        matched_comps: set[str] = set()  # first-path-components already attributed
         if path_attribution:
             # Primary: directories table (cumulative sizes, fast).
             dir_rows = conn.execute(sqlt(f"""
                 SELECT SUBSTR(path, {off}) AS comp, total_size_bytes, file_count
                 FROM directories
-                WHERE mount_id = {mount_id} AND scan_id = {scan_id}
-                AND SUBSTR(path, {off}) != ''
-                AND INSTR(SUBSTR(path, {off}), '/') = 0
+                WHERE mount_id={mount_id} AND scan_id={scan_id}
+                AND SUBSTR(path,{off}) != ''
+                AND INSTR(SUBSTR(path,{off}),'/') = 0
             """)).fetchall()
 
-            # Fallback: directories table empty for this mount (e.g. interrupted scan).
-            # Derive first-component totals directly from the files table instead.
+            # Fallback when directories table is empty (e.g. interrupted scan):
+            # derive first-component totals from files table directly.
             if not dir_rows:
                 dir_rows = conn.execute(sqlt(f"""
-                    SELECT
-                        CASE
-                            WHEN INSTR(SUBSTR(path, {off}), '/') = 0 THEN SUBSTR(path, {off})
-                            ELSE SUBSTR(SUBSTR(path, {off}), 1, INSTR(SUBSTR(path, {off}), '/') - 1)
-                        END AS comp,
-                        SUM(size_bytes) AS ts, COUNT(*) AS fc
+                    SELECT {first_comp} AS comp,
+                           SUM(size_bytes) AS ts, COUNT(*) AS fc
                     FROM files
-                    WHERE mount_id = {mount_id} AND scan_id = {scan_id}
+                    WHERE mount_id={mount_id} AND scan_id={scan_id}
                     GROUP BY comp
                 """)).fetchall()
 
@@ -325,46 +327,46 @@ def _build_user_agg_per_mount(conn, mount_triples: list, known_usernames: set, u
                     continue
                 ts = ts or 0
                 fc = fc or 0
-                # Only attribute to a bucket if the directory name prefix-matches a
-                # known username (local passwd + custom_users list). Unmatched dirs
-                # (datasets, shared dirs, etc.) fall through to the uid fallback below.
                 matched_name = None
                 for name in sorted_names:
                     if comp.lower().startswith(name.lower()):
                         matched_name = name
                         break
                 if matched_name:
-                    # Resolve alias → canonical primary name
                     bucket = name_to_canonical.get(matched_name, matched_name) if name_to_canonical else matched_name
                     agg[bucket]["file_count"] += fc
                     agg[bucket]["total_size_bytes"] += ts
-                    matched_size += ts
-                    matched_count += fc
+                    matched_comps.add(comp)
 
-        # ── Step 2: uid-based attribution for unmatched portion ───────────────────────
-        # Get uid totals for the whole mount (fast: GROUP BY uid with covering index).
-        uid_rows = conn.execute(sqlt(f"""
-            SELECT uid, SUM(size_bytes) AS ts, COUNT(*) AS fc
-            FROM files WHERE mount_id = {mount_id} AND scan_id = {scan_id}
-            GROUP BY uid
-        """)).fetchall()
+        # ── Step 2: uid attribution for files NOT covered by Step 1 ──────────
+        # Query uid totals restricted to files whose first path component was NOT
+        # matched in Step 1. This guarantees each file is attributed exactly once.
+        if matched_comps:
+            # Build NOT IN list (comps are SAFE-regex validated; no SQL injection risk)
+            not_in = ",".join(f"'{c}'" for c in matched_comps)
+            uid_rows = conn.execute(sqlt(f"""
+                SELECT uid, SUM(size_bytes) AS ts, COUNT(*) AS fc
+                FROM files
+                WHERE mount_id={mount_id} AND scan_id={scan_id}
+                AND ({first_comp}) NOT IN ({not_in})
+                GROUP BY uid
+            """)).fetchall()
+        else:
+            # No path attribution happened — attribute all files by uid.
+            uid_rows = conn.execute(sqlt(f"""
+                SELECT uid, SUM(size_bytes) AS ts, COUNT(*) AS fc
+                FROM files WHERE mount_id={mount_id} AND scan_id={scan_id}
+                GROUP BY uid
+            """)).fetchall()
 
-        mount_total_size = sum(r[1] or 0 for r in uid_rows)
-        mount_total_count = sum(r[2] or 0 for r in uid_rows)
-        unmatched_size = max(0, mount_total_size - matched_size)
-        unmatched_count = max(0, mount_total_count - matched_count)
-
-        if unmatched_count > 0 and mount_total_count > 0:
-            for uid, ts, fc in uid_rows:
-                ts = ts or 0
-                fc = fc or 0
-                name = uid_to_name.get(uid, f"uid:{uid}" if uid is not None else "unknown")
-                frac_count = fc / mount_total_count
-                frac_size = ts / mount_total_size if mount_total_size else frac_count
-                agg[name]["file_count"] += round(unmatched_count * frac_count)
-                agg[name]["total_size_bytes"] += round(unmatched_size * frac_size)
-                if uid is not None and name in known_usernames:
-                    agg[name]["uids"].add(str(uid))
+        for uid, ts, fc in uid_rows:
+            ts = ts or 0
+            fc = fc or 0
+            name = uid_to_name.get(uid, f"uid:{uid}" if uid is not None else "unknown")
+            agg[name]["file_count"] += fc
+            agg[name]["total_size_bytes"] += ts
+            if uid is not None and name in known_usernames:
+                agg[name]["uids"].add(str(uid))
 
     return agg
 
