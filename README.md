@@ -66,6 +66,7 @@ docker compose up -d
 | `EXCLUDE_PATHS` | `/proc,/sys,/dev,/run,/snap` | Always-excluded paths |
 | `NETWORK_FS_TYPES` | `nfs,nfs4,cifs,smb3,...` | FS types treated as network mounts |
 | `LOG_LEVEL` | `INFO` | Logging verbosity |
+| `PATH_USER_ATTRIBUTION` | `true` | Attribute files by top-level directory name first (before uid). Useful for NFS4 mounts without uid isolation — e.g. `/media/NAS02/jiahao/` always goes to `jiahao` regardless of the file's uid. Set to `false` to use uid-only attribution. |
 
 ---
 
@@ -140,6 +141,18 @@ And set `SCAN_ROOTS=/host/mnt` in `.env`. Be aware that `shutil.disk_usage` and 
 ### Why `--one-filesystem` matters
 
 Without xdev (cross-device) protection, scanning `/mnt` on a server with 30 NAS mounts would recursively descend into all of them. The `--one-filesystem` flag (default: on) uses `os.stat().st_dev` to detect when a directory crosses into a different filesystem and skips it. Always leave this on when scanning NAS environments.
+
+---
+
+## Documentation
+
+Detailed documentation is available in the [`docs/`](docs/) directory:
+
+- [Architecture](docs/architecture.md) — system design, data flow, why scanner runs on host
+- [Configuration](docs/configuration.md) — full `.env` reference
+- [Scanner CLI](docs/scanner.md) — all scanner commands and flags
+- [Deployment](docs/deployment.md) — Docker, systemd, nginx, reverse proxy
+- [User Attribution](docs/user-attribution.md) — how per-user disk usage is calculated, NFS4 uid collision fix
 
 ---
 

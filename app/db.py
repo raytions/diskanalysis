@@ -95,6 +95,15 @@ def _migrate(eng):
             conn.commit()
             logger.info("Migrated: added ix_files_ms_size index")
 
+        # Covering index for cold-files-by-size per mount: enables instant ORDER BY LIMIT for cold tab
+        if "ix_files_ms_cold_size" not in existing_idx:
+            conn.execute(text(
+                "CREATE INDEX IF NOT EXISTS ix_files_ms_cold_size "
+                "ON files (mount_id, scan_id, is_cold, size_bytes DESC) WHERE is_symlink=0"
+            ))
+            conn.commit()
+            logger.info("Migrated: added ix_files_ms_cold_size index")
+
         # Partial covering index for atime (cold files) ordering
         if "ix_files_ms_atime" not in existing_idx:
             conn.execute(text(
@@ -137,3 +146,7 @@ def _migrate(eng):
             conn.execute(text("CREATE INDEX IF NOT EXISTS ix_dirs_scan_total_size ON directories (scan_id, total_size_bytes)"))
             conn.commit()
             logger.info("Migrated: added ix_dirs_scan_total_size index")
+        if "ix_dirs_mount_scan_size" not in dir_idx:
+            conn.execute(text("CREATE INDEX IF NOT EXISTS ix_dirs_mount_scan_size ON directories (mount_id, scan_id, total_size_bytes DESC)"))
+            conn.commit()
+            logger.info("Migrated: added ix_dirs_mount_scan_size index")

@@ -20,6 +20,7 @@ class Settings(BaseSettings):
     NETWORK_FS_TYPES: str = "nfs,nfs4,cifs,smb3,smbfs,davfs,samba,fuse.sshfs,fuse.s3fs,glusterfs,cephfs,lustre"
     LOG_LEVEL: str = "INFO"
     ADMIN_PASSWORD: str = ""  # Leave empty to disable auth (open access)
+    PATH_USER_ATTRIBUTION: bool = True  # Attribute files by top-level directory name before falling back to uid
 
     @model_validator(mode="after")
     def _fix_local_db_path(self) -> "Settings":

@@ -186,128 +186,128 @@ def get_extension_summary(
     ]
 
 
-def _resolve_users(uid_rows) -> tuple[dict, set, dict, int, int]:
+def _collect_known_usernames(conn, where_sql: str) -> tuple[set, dict]:
     """
-    Resolve uid rows to usernames via stored value or pwd lookup.
-    Returns (agg, known_usernames, unresolved_uids, null_fc, null_ts).
-    agg: defaultdict {username -> {file_count, total_size_bytes, uids}}
-    unresolved_uids: {uid -> {file_count, total_size_bytes}} for uids that failed pwd lookup
-    null_fc/null_ts: totals for files with NULL uid
+    Query distinct uids in the file set, resolve to real usernames.
+    Returns (known_usernames, uid_to_name).
+    known_usernames: safe real names used for path LIKE matching.
+    uid_to_name: uid -> resolved name (including "uid:N" fallbacks).
     """
     import pwd
     import re
-    from collections import defaultdict
+    from sqlalchemy import text as sqlt
+    _SAFE = re.compile(r'^[a-zA-Z0-9_\-\.]+$')
 
-    _SAFE_NAME = re.compile(r'^[a-zA-Z0-9_\-\.]+$')
-    agg = defaultdict(lambda: {"file_count": 0, "total_size_bytes": 0, "uids": set()})
-    known_usernames: set[str] = set()
-    unresolved: dict[int, dict] = {}
-    null_fc = null_ts = 0
+    rows = conn.execute(sqlt(
+        f"SELECT uid, MAX(username) FROM files WHERE {where_sql} GROUP BY uid"
+    )).fetchall()
 
-    for uid, stored_name, fc, ts in uid_rows:
-        fc = fc or 0
-        ts = ts or 0
-        if stored_name and _SAFE_NAME.match(stored_name):
-            name = stored_name
-            known_usernames.add(name)
-            agg[name]["file_count"] += fc
-            agg[name]["total_size_bytes"] += ts
+    known: set[str] = set()
+    uid_to_name: dict = {}
+
+    for uid, stored_name in rows:
+        if stored_name and _SAFE.match(stored_name):
+            known.add(stored_name)
             if uid is not None:
-                agg[name]["uids"].add(str(uid))
+                uid_to_name[uid] = stored_name
         elif uid is not None:
             try:
                 name = pwd.getpwuid(uid).pw_name
-                if _SAFE_NAME.match(name):
-                    known_usernames.add(name)
-                    agg[name]["file_count"] += fc
-                    agg[name]["total_size_bytes"] += ts
-                    agg[name]["uids"].add(str(uid))
+                if _SAFE.match(name):
+                    known.add(name)
+                    uid_to_name[uid] = name
                 else:
-                    unresolved[uid] = {"file_count": fc, "total_size_bytes": ts}
+                    uid_to_name[uid] = f"uid:{uid}"
             except (KeyError, TypeError):
-                unresolved[uid] = {"file_count": fc, "total_size_bytes": ts}
-        else:
-            null_fc += fc
-            null_ts += ts
+                uid_to_name[uid] = f"uid:{uid}"
 
-    return agg, known_usernames, unresolved, null_fc, null_ts
+    return known, uid_to_name
 
 
-def _apply_path_attribution(conn, where_sql: str, agg: dict, known_usernames: set,
-                             unresolved: dict, null_fc: int, null_ts: int) -> None:
+def _build_user_agg_per_mount(conn, mount_triples: list, known_usernames: set, uid_to_name: dict, path_attribution: bool = True) -> dict:
     """
-    For files with unresolvable uid or NULL uid, attribute to a known username
-    if the file path contains that username as a path component.
-    Deducts from the uid:N/unknown bucket and adds to the matched username.
-    Modifies agg in-place.
+    Attribute disk usage to users using a two-step strategy per mount:
+
+    1. Directory-based path attribution (PRIMARY, fast):
+       Fetch top-level directories under each mount point from the *directories* table
+       (cumulative sizes). Prefix-match the directory name against known usernames.
+       Example: /media/NAS02/jiahao/ → jiahao, /media/hdd/yyfangspx/ → yyfang.
+       This handles NFS4 mounts where uid isolation is absent — the folder name is
+       authoritative regardless of file uid (e.g. uid=1024 colliding with local 'ula').
+
+    2. Uid-based attribution (FALLBACK):
+       Files not covered by any matched top-level directory are attributed by uid.
+       Distributed proportionally based on each uid's share of the mount's total size.
+
+    mount_triples: [(mount_id, scan_id, mount_point), ...]
     """
     import re
     from collections import defaultdict
     from sqlalchemy import text as sqlt
+    _SAFE = re.compile(r'^[a-zA-Z0-9_\-\.]+$')
 
-    _SAFE_NAME = re.compile(r'^[a-zA-Z0-9_\-\.]+$')
-    has_unattr = bool(unresolved) or null_fc > 0
+    agg: dict = defaultdict(lambda: {"file_count": 0, "total_size_bytes": 0, "uids": set()})
+    sorted_names = sorted((n for n in known_usernames if _SAFE.match(n)), key=len, reverse=True)
 
-    if not known_usernames or not has_unattr:
-        # No path matching needed — just flush remainders directly
-        for uid, totals in unresolved.items():
-            agg[f"uid:{uid}"]["file_count"] += totals["file_count"]
-            agg[f"uid:{uid}"]["total_size_bytes"] += totals["total_size_bytes"]
-            agg[f"uid:{uid}"]["uids"].add(str(uid))
-        if null_fc > 0:
-            agg["unknown"]["file_count"] += null_fc
-            agg["unknown"]["total_size_bytes"] += null_ts
-        return
+    for mount_id, scan_id, mount_point in mount_triples:
+        # rstrip('/') makes mount_point='/' → off=2 work correctly (avoids off-by-one)
+        off = len(mount_point.rstrip('/')) + 2
 
-    # Build CASE WHEN — longer names first to avoid prefix collisions (e.g. "yang" vs "ltyang")
-    sorted_names = sorted((n for n in known_usernames if _SAFE_NAME.match(n)), key=len, reverse=True)
-    case_parts = " ".join(
-        f"WHEN path LIKE '%/{n}/%' OR path LIKE '%/{n}' THEN '{n}'"
-        for n in sorted_names
-    )
+        # ── Step 1: top-level directory path attribution (optional) ──────────────────
+        matched_size = matched_count = 0
+        if path_attribution:
+            # Depth-1 dirs: SUBSTR(path, off) has no '/' → direct children of mount_point.
+            # Directories table stores CUMULATIVE sizes — each dir includes all descendants.
+            dir_rows = conn.execute(sqlt(f"""
+                SELECT SUBSTR(path, {off}) AS comp, total_size_bytes, file_count
+                FROM directories
+                WHERE mount_id = {mount_id} AND scan_id = {scan_id}
+                AND SUBSTR(path, {off}) != ''
+                AND INSTR(SUBSTR(path, {off}), '/') = 0
+            """)).fetchall()
 
-    uid_filter = "uid IS NULL"
-    if unresolved:
-        uid_list = ",".join(str(u) for u in unresolved)
-        uid_filter = f"(uid IS NULL OR uid IN ({uid_list}))"
+            for comp, ts, fc in dir_rows:
+                if not comp:
+                    continue
+                ts = ts or 0
+                fc = fc or 0
+                matched_name = None
+                for name in sorted_names:
+                    if comp.lower().startswith(name.lower()):
+                        matched_name = name
+                        break
+                if matched_name:
+                    agg[matched_name]["file_count"] += fc
+                    agg[matched_name]["total_size_bytes"] += ts
+                    matched_size += ts
+                    matched_count += fc
 
-    path_sql = f"""
-        SELECT uid,
-               CASE {case_parts} ELSE NULL END AS matched_user,
-               SUM(size_bytes) AS total_size_bytes,
-               COUNT(*) AS file_count
-        FROM files
-        WHERE {where_sql} AND {uid_filter}
-        GROUP BY uid, matched_user
-    """
-    rows = conn.execute(sqlt(path_sql)).fetchall()
+        # ── Step 2: uid-based attribution for unmatched portion ───────────────────────
+        # Get uid totals for the whole mount (fast: GROUP BY uid with covering index).
+        uid_rows = conn.execute(sqlt(f"""
+            SELECT uid, SUM(size_bytes) AS ts, COUNT(*) AS fc
+            FROM files WHERE mount_id = {mount_id} AND scan_id = {scan_id}
+            GROUP BY uid
+        """)).fetchall()
 
-    uid_matched: dict = defaultdict(lambda: {"file_count": 0, "total_size_bytes": 0})
-    for row_uid, matched_user, ts, fc in rows:
-        if matched_user is not None:
-            agg[matched_user]["file_count"] += fc or 0
-            agg[matched_user]["total_size_bytes"] += ts or 0
-            uid_matched[row_uid]["file_count"] += fc or 0
-            uid_matched[row_uid]["total_size_bytes"] += ts or 0
+        mount_total_size = sum(r[1] or 0 for r in uid_rows)
+        mount_total_count = sum(r[2] or 0 for r in uid_rows)
+        unmatched_size = max(0, mount_total_size - matched_size)
+        unmatched_count = max(0, mount_total_count - matched_count)
 
-    # Remainder of unresolved uids that didn't match any path → uid:N
-    for uid, totals in unresolved.items():
-        m = uid_matched.get(uid, {"file_count": 0, "total_size_bytes": 0})
-        rem_fc = totals["file_count"] - m["file_count"]
-        rem_ts = totals["total_size_bytes"] - m["total_size_bytes"]
-        if rem_fc > 0 or rem_ts > 0:
-            agg[f"uid:{uid}"]["file_count"] += rem_fc
-            agg[f"uid:{uid}"]["total_size_bytes"] += rem_ts
-            agg[f"uid:{uid}"]["uids"].add(str(uid))
+        if unmatched_count > 0 and mount_total_count > 0:
+            for uid, ts, fc in uid_rows:
+                ts = ts or 0
+                fc = fc or 0
+                name = uid_to_name.get(uid, f"uid:{uid}" if uid is not None else "unknown")
+                frac_count = fc / mount_total_count
+                frac_size = ts / mount_total_size if mount_total_size else frac_count
+                agg[name]["file_count"] += round(unmatched_count * frac_count)
+                agg[name]["total_size_bytes"] += round(unmatched_size * frac_size)
+                if uid is not None and name in known_usernames:
+                    agg[name]["uids"].add(str(uid))
 
-    # Remainder of NULL uid files that didn't match any path → unknown
-    if null_fc > 0:
-        m = uid_matched.get(None, {"file_count": 0, "total_size_bytes": 0})
-        rem_fc = null_fc - m["file_count"]
-        rem_ts = null_ts - m["total_size_bytes"]
-        if rem_fc > 0:
-            agg["unknown"]["file_count"] += rem_fc
-            agg["unknown"]["total_size_bytes"] += rem_ts
+    return agg
 
 
 def get_user_summary(
@@ -316,28 +316,21 @@ def get_user_summary(
     limit: int = 50,
     scan_id: int | None = None,
 ) -> list[dict]:
-    from sqlalchemy import text as sqlt
-
+    from app.models import Mount as MountModel
     if scan_id is None:
         scan_id = _latest_scan_id_for_mount(db, mount_id)
     if scan_id is None:
         return []
 
-    uid_sql = f"""
-        SELECT uid, MAX(username) AS stored_username,
-               COUNT(*) AS file_count, SUM(size_bytes) AS total_size_bytes
-        FROM files
-        WHERE mount_id = {mount_id} AND scan_id = {scan_id} AND is_symlink = 0
-        GROUP BY uid
-    """
-    with db.bind.connect() as conn:
-        uid_rows = conn.execute(sqlt(uid_sql)).fetchall()
+    mount = db.query(MountModel).filter(MountModel.id == mount_id).first()
+    mount_point = mount.mount_point if mount else ""
 
-    agg, known_usernames, unresolved, null_fc, null_ts = _resolve_users(uid_rows)
-
-    where_sql = f"mount_id = {mount_id} AND scan_id = {scan_id} AND is_symlink = 0"
+    where_sql = f"mount_id = {mount_id} AND scan_id = {scan_id}"
+    from app.config import settings
     with db.bind.connect() as conn:
-        _apply_path_attribution(conn, where_sql, agg, known_usernames, unresolved, null_fc, null_ts)
+        known_usernames, uid_to_name = _collect_known_usernames(conn, where_sql)
+        agg = _build_user_agg_per_mount(conn, [(mount_id, scan_id, mount_point)], known_usernames, uid_to_name,
+                                        path_attribution=settings.PATH_USER_ATTRIBUTION)
 
     result = sorted(
         [{"uid": ",".join(sorted(v["uids"], key=lambda x: int(x) if x.isdigit() else 0)) or "—",

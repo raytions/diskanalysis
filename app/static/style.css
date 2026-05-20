@@ -143,7 +143,8 @@ a:hover { text-decoration: underline; }
 
 /* ── Two column ── */
 .two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; margin-bottom: 1.25rem; }
-@media (max-width: 900px) { .two-col { grid-template-columns: 1fr; } }
+@media (min-width: 901px) { .two-col { margin-bottom: 0; } }
+@media (max-width: 900px) { .two-col { grid-template-columns: 1fr; } .two-col .card { margin-bottom: 0; } }
 
 /* ── Usage bar ── */
 .usage-bar-wrap { background: var(--surface2); border-radius: 4px; height: 6px; overflow: hidden; display: inline-block; width: 80px; vertical-align: middle; margin-right: .4rem; }
@@ -343,3 +344,22 @@ select option { background: var(--surface); color: var(--text); }
 .data-table th.sortable:hover { color: var(--accent); }
 .data-table th.sort-asc::after  { content: ' ▲'; font-size: .7em; opacity: .7; }
 .data-table th.sort-desc::after { content: ' ▼'; font-size: .7em; opacity: .7; }
+
+/* ── Scans page layout ── */
+.scans-layout { display: flex; gap: 1.25rem; align-items: flex-start; }
+.scans-run-panel { flex: 0 0 360px; }
+@media (max-width: 800px) {
+  .scans-layout { flex-direction: column; }
+  .scans-run-panel { flex: 1 1 auto; width: 100%; }
+}
+
+/* ── Narrow screen (< 540px) fixes ── */
+@media (max-width: 540px) {
+  .container { padding: 1rem .75rem; }
+  .navbar { padding: 0 .75rem; gap: .4rem; }
+  .nav-links a { padding: .35rem .45rem; font-size: .78rem; }
+  .nav-title { font-size: .9rem; }
+  .page-header h1 { font-size: 1.2rem; }
+  .stats-grid { grid-template-columns: repeat(2, 1fr); }
+  .path-cell { max-width: 180px; }
+}

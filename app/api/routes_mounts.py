@@ -35,55 +35,120 @@ def dashboard_overview_tab(
     db: Session = Depends(get_db),
 ):
     """Paginated data for Global Overview tabs: files, dirs, cold, users, dupes."""
-    from sqlalchemy import func, text as sqlt
-    from app.models import Directory, File
-    from app.services.analytics import _latest_scan_id_for_mount, _file_dict, _dir_dict
+    from sqlalchemy import text as sqlt
+    from app.services.analytics import _latest_scan_id_for_mount, _collect_known_usernames
 
     mounts = db.query(Mount).filter(Mount.is_accessible == True).all()
-    sids = list({_latest_scan_id_for_mount(db, m.id) for m in mounts} - {None})
     mount_map = {str(m.id): m.mount_point for m in mounts}
 
-    if not sids:
+    # Build (mount_id, scan_id) pairs — preserves per-mount granularity for UNION ALL
+    mount_scan_pairs: list[tuple[int, int]] = []
+    seen: set = set()
+    for m in mounts:
+        sid = _latest_scan_id_for_mount(db, m.id)
+        if sid is not None and (m.id, sid) not in seen:
+            mount_scan_pairs.append((m.id, sid))
+            seen.add((m.id, sid))
+
+    if not mount_scan_pairs:
         return ok({"items": [], "total": 0, "limit": limit, "offset": offset, "mount_map": mount_map})
 
+    sids = list({sid for _, sid in mount_scan_pairs})
+    sid_in = ",".join(str(s) for s in sids)
+    sub_n = offset + limit  # rows each mount sub-query contributes
+
+    def _union_files(extra_where: str = "") -> str:
+        """UNION ALL of per-mount file queries using ix_files_ms_size covering index.
+        Each part is wrapped in SELECT…FROM(subquery) so ORDER BY LIMIT is valid inside UNION ALL."""
+        parts = [
+            f"SELECT id,path,size_bytes,extension,mtime,atime,is_cold,cold_days_bucket,mount_id FROM ("
+            f"SELECT id,path,size_bytes,extension,mtime,atime,is_cold,cold_days_bucket,mount_id "
+            f"FROM files WHERE mount_id={mid} AND scan_id={sid} AND is_symlink=0{extra_where} "
+            f"ORDER BY size_bytes DESC LIMIT {sub_n})"
+            for mid, sid in mount_scan_pairs
+        ]
+        return " UNION ALL ".join(parts)
+
+    def _union_dirs() -> str:
+        parts = [
+            f"SELECT id,path,total_size_bytes,file_count,cold_file_count,cold_total_size_bytes,mount_id FROM ("
+            f"SELECT id,path,total_size_bytes,file_count,cold_file_count,cold_total_size_bytes,mount_id "
+            f"FROM directories WHERE mount_id={mid} AND scan_id={sid} "
+            f"ORDER BY total_size_bytes DESC LIMIT {sub_n})"
+            for mid, sid in mount_scan_pairs
+        ]
+        return " UNION ALL ".join(parts)
+
+    def _count_files(extra_where: str = "") -> int:
+        parts = [
+            f"SELECT COUNT(*) AS c FROM files "
+            f"WHERE mount_id={mid} AND scan_id={sid} AND is_symlink=0{extra_where}"
+            for mid, sid in mount_scan_pairs
+        ]
+        with db.bind.connect() as conn:
+            return conn.execute(sqlt(
+                f"SELECT SUM(c) FROM ({' UNION ALL '.join(parts)})"
+            )).fetchone()[0] or 0
+
+    def _count_dirs() -> int:
+        parts = [
+            f"SELECT COUNT(*) AS c FROM directories WHERE mount_id={mid} AND scan_id={sid}"
+            for mid, sid in mount_scan_pairs
+        ]
+        with db.bind.connect() as conn:
+            return conn.execute(sqlt(
+                f"SELECT SUM(c) FROM ({' UNION ALL '.join(parts)})"
+            )).fetchone()[0] or 0
+
     if tab == "files":
-        q = db.query(File).filter(File.scan_id.in_(sids), File.is_symlink == False).order_by(File.size_bytes.desc())
-        total = q.count()
-        rows = q.offset(offset).limit(limit).all()
-        items = [_file_dict(f) for f in rows]
+        union = _union_files()
+        total = _count_files()
+        with db.bind.connect() as conn:
+            rows = conn.execute(sqlt(
+                f"SELECT id,path,size_bytes,extension,mtime,atime,is_cold,cold_days_bucket,mount_id "
+                f"FROM ({union}) ORDER BY size_bytes DESC LIMIT {limit} OFFSET {offset}"
+            )).fetchall()
+        items = [{"id": r[0], "path": r[1], "size_bytes": r[2], "extension": r[3],
+                  "mtime": r[4], "atime": r[5], "is_cold": r[6], "cold_days_bucket": r[7],
+                  "mount_id": r[8]}
+                 for r in rows]
 
     elif tab == "dirs":
-        q = db.query(Directory).filter(Directory.scan_id.in_(sids)).order_by(Directory.total_size_bytes.desc())
-        total = q.count()
-        rows = q.offset(offset).limit(limit).all()
-        items = [_dir_dict(d) for d in rows]
+        union = _union_dirs()
+        total = _count_dirs()
+        with db.bind.connect() as conn:
+            rows = conn.execute(sqlt(
+                f"SELECT id,path,total_size_bytes,file_count,cold_file_count,cold_total_size_bytes,mount_id "
+                f"FROM ({union}) ORDER BY total_size_bytes DESC LIMIT {limit} OFFSET {offset}"
+            )).fetchall()
+        items = [{"id": r[0], "path": r[1], "total_size_bytes": r[2], "file_count": r[3],
+                  "cold_file_count": r[4], "cold_total_size_bytes": r[5], "mount_id": r[6]}
+                 for r in rows]
 
     elif tab == "cold":
-        q = db.query(File).filter(File.scan_id.in_(sids), File.is_cold == True, File.is_symlink == False).order_by(File.size_bytes.desc())
-        total = q.count()
-        rows = q.offset(offset).limit(limit).all()
-        items = [_file_dict(f) for f in rows]
+        union = _union_files(" AND is_cold=1")
+        total = _count_files(" AND is_cold=1")
+        with db.bind.connect() as conn:
+            rows = conn.execute(sqlt(
+                f"SELECT id,path,size_bytes,extension,mtime,atime,is_cold,cold_days_bucket,mount_id "
+                f"FROM ({union}) WHERE is_cold=1 ORDER BY size_bytes DESC LIMIT {limit} OFFSET {offset}"
+            )).fetchall()
+        items = [{"id": r[0], "path": r[1], "size_bytes": r[2], "extension": r[3],
+                  "mtime": r[4], "atime": r[5], "is_cold": r[6], "cold_days_bucket": r[7],
+                  "mount_id": r[8]}
+                 for r in rows]
 
     elif tab == "users":
-        from app.services.analytics import _resolve_users, _apply_path_attribution
-        sid_in = ",".join(str(s) for s in sids)
-        uid_sql = f"""
-            SELECT uid, MAX(username) AS stored_username,
-                   COUNT(*) AS file_count, SUM(size_bytes) AS total_size_bytes
-            FROM files WHERE scan_id IN ({sid_in})
-            GROUP BY uid
-        """
+        from app.services.analytics import _build_user_agg_per_mount
+        from app.config import settings
+        # Collect known usernames from uid resolution across all mounts
         with db.bind.connect() as conn:
-            uid_rows = conn.execute(sqlt(uid_sql)).fetchall()
-
-        agg, known_usernames, unresolved, null_fc, null_ts = _resolve_users(uid_rows)
-
+            known_usernames, uid_to_name = _collect_known_usernames(conn, f"scan_id IN ({sid_in})")
+        # Build triples including mount_point for first-component matching
+        mount_triples = [(mid, sid, mount_map[str(mid)]) for mid, sid in mount_scan_pairs]
         with db.bind.connect() as conn:
-            _apply_path_attribution(
-                conn, f"scan_id IN ({sid_in})",
-                agg, known_usernames, unresolved, null_fc, null_ts,
-            )
-
+            agg = _build_user_agg_per_mount(conn, mount_triples, known_usernames, uid_to_name,
+                                            path_attribution=settings.PATH_USER_ATTRIBUTION)
         all_users = sorted(
             [{"username": n, "file_count": v["file_count"], "total_size_bytes": v["total_size_bytes"],
               "uids": ",".join(sorted(v["uids"], key=lambda x: int(x) if x.isdigit() else 0))}
@@ -94,43 +159,26 @@ def dashboard_overview_tab(
         items = all_users[offset: offset + limit]
 
     elif tab == "dupes":
-        # Exact filename + exact size; min 1 MB; basename via registered SQLite UDF
-        sid_in = ",".join(str(s) for s in sids)
         dup_sql = f"""
-            SELECT
-              basename(path) AS fname,
-              size_bytes,
-              COUNT(*) AS cnt,
-              SUM(size_bytes) AS wasted,
-              GROUP_CONCAT(path, '|||') AS paths
+            SELECT basename(path) AS fname, size_bytes, COUNT(*) AS cnt,
+                   SUM(size_bytes) AS wasted, GROUP_CONCAT(path, '|||') AS paths
             FROM files
             WHERE scan_id IN ({sid_in}) AND is_symlink=0 AND size_bytes >= 1048576
-            GROUP BY fname, size_bytes
-            HAVING cnt > 1
-            ORDER BY wasted DESC
-            LIMIT :limit OFFSET :offset
+            GROUP BY fname, size_bytes HAVING cnt > 1
+            ORDER BY wasted DESC LIMIT :limit OFFSET :offset
         """
         count_sql = f"""
             SELECT COUNT(*) FROM (
-              SELECT 1 FROM files
-              WHERE scan_id IN ({sid_in}) AND is_symlink=0 AND size_bytes >= 1048576
-              GROUP BY basename(path), size_bytes
-              HAVING COUNT(*) > 1
+              SELECT 1 FROM files WHERE scan_id IN ({sid_in}) AND is_symlink=0 AND size_bytes >= 1048576
+              GROUP BY basename(path), size_bytes HAVING COUNT(*) > 1
             )
         """
         with db.bind.connect() as conn:
             raw_rows = conn.execute(sqlt(dup_sql), {"limit": limit, "offset": offset}).fetchall()
             total = conn.execute(sqlt(count_sql)).fetchone()[0]
-        items = [
-            {
-                "filename": r[0],
-                "size_bytes": r[1],
-                "count": r[2],
-                "wasted_bytes": r[3],
-                "paths": r[4].split("|||") if r[4] else [],
-            }
-            for r in raw_rows
-        ]
+        items = [{"filename": r[0], "size_bytes": r[1], "count": r[2], "wasted_bytes": r[3],
+                  "paths": r[4].split("|||") if r[4] else []}
+                 for r in raw_rows]
 
     else:
         return ok({"items": [], "total": 0, "limit": limit, "offset": offset, "mount_map": mount_map})

@@ -7,10 +7,10 @@
   <h1>Scans</h1>
 </div>
 
-<div style="display:flex;gap:1.25rem;align-items:flex-start;">
+<div class="scans-layout">
 
 {% if can_admin %}
-<section class="card" style="flex:0 0 360px;min-width:0;">
+<section class="card scans-run-panel" style="min-width:0;">
   <h2>Run Scan</h2>
   <form id="scan-form" onsubmit="submitScan(event)">
     <div class="form-group">
@@ -120,7 +120,11 @@
         <td class="path-cell dimmed" title="{{ s.target_path or '' }}">{{ s.target_path or 'all' }}</td>
         <td><span class="badge badge-{{ s.status }}">{{ s.status }}</span></td>
         <td class="dimmed" style="white-space:nowrap;">{{ s.started_at.strftime('%Y-%m-%d %H:%M') }}</td>
-        <td class="num" style="white-space:nowrap;">{% if s.duration_seconds %}{{ "%.1f"|format(s.duration_seconds) }}s{% else %}—{% endif %}</td>
+        {% if s.status == 'running' %}
+        <td class="num elapsed-cell" data-started="{{ s.started_at.isoformat() }}" style="white-space:nowrap;">—</td>
+        {% else %}
+        <td class="num" style="white-space:nowrap;">{{ s.duration_seconds | fmt_duration }}</td>
+        {% endif %}
         <td class="num">{{ s.total_files }}</td>
         <td class="num">{{ s.total_bytes | fmt_bytes }}</td>
         <td class="num {% if s.error_count > 0 %}warn-text{% endif %}">{{ s.error_count }}</td>
@@ -268,6 +272,21 @@ function showToast(msg) {
 {% set has_running = scans | selectattr("status", "equalto", "running") | list %}
 {% if has_running %}
 setTimeout(() => location.reload(), 5000);
+
+function fmtDur(s) {
+  if (s >= 3600) return (s / 3600).toFixed(1) + 'h';
+  if (s >= 60)   return (s / 60).toFixed(1) + 'm';
+  return s.toFixed(1) + 's';
+}
+function tickElapsed() {
+  const now = Date.now();
+  document.querySelectorAll('.elapsed-cell').forEach(td => {
+    const started = new Date(td.dataset.started).getTime();
+    td.textContent = fmtDur((now - started) / 1000);
+  });
+}
+tickElapsed();
+setInterval(tickElapsed, 1000);
 {% endif %}
 </script>
 {% endblock %}
