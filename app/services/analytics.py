@@ -256,8 +256,7 @@ def _build_user_agg_per_mount(conn, mount_triples: list, known_usernames: set, u
         # ── Step 1: top-level directory path attribution (optional) ──────────────────
         matched_size = matched_count = 0
         if path_attribution:
-            # Depth-1 dirs: SUBSTR(path, off) has no '/' → direct children of mount_point.
-            # Directories table stores CUMULATIVE sizes — each dir includes all descendants.
+            # Primary: directories table (cumulative sizes, fast).
             dir_rows = conn.execute(sqlt(f"""
                 SELECT SUBSTR(path, {off}) AS comp, total_size_bytes, file_count
                 FROM directories
@@ -266,21 +265,41 @@ def _build_user_agg_per_mount(conn, mount_triples: list, known_usernames: set, u
                 AND INSTR(SUBSTR(path, {off}), '/') = 0
             """)).fetchall()
 
+            # Fallback: directories table empty for this mount (e.g. interrupted scan).
+            # Derive first-component totals directly from the files table instead.
+            if not dir_rows:
+                dir_rows = conn.execute(sqlt(f"""
+                    SELECT
+                        CASE
+                            WHEN INSTR(SUBSTR(path, {off}), '/') = 0 THEN SUBSTR(path, {off})
+                            ELSE SUBSTR(SUBSTR(path, {off}), 1, INSTR(SUBSTR(path, {off}), '/') - 1)
+                        END AS comp,
+                        SUM(size_bytes) AS ts, COUNT(*) AS fc
+                    FROM files
+                    WHERE mount_id = {mount_id} AND scan_id = {scan_id}
+                    GROUP BY comp
+                """)).fetchall()
+
             for comp, ts, fc in dir_rows:
                 if not comp:
                     continue
                 ts = ts or 0
                 fc = fc or 0
+                # Try prefix-match against known usernames (e.g. yyfangspx → yyfang).
                 matched_name = None
                 for name in sorted_names:
                     if comp.lower().startswith(name.lower()):
                         matched_name = name
                         break
-                if matched_name:
-                    agg[matched_name]["file_count"] += fc
-                    agg[matched_name]["total_size_bytes"] += ts
-                    matched_size += ts
-                    matched_count += fc
+                # If no known user matches, use the directory name itself as the bucket
+                # so NAS dirs like /media/NAS02/jiahao/ become "jiahao" instead of
+                # collapsing into the uid=1024 "ula" bucket.
+                if matched_name is None:
+                    matched_name = comp
+                agg[matched_name]["file_count"] += fc
+                agg[matched_name]["total_size_bytes"] += ts
+                matched_size += ts
+                matched_count += fc
 
         # ── Step 2: uid-based attribution for unmatched portion ───────────────────────
         # Get uid totals for the whole mount (fast: GROUP BY uid with covering index).

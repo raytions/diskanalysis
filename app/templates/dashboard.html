@@ -145,11 +145,15 @@ function buildPager(tab) {
     `<option value="${s}"${s===st.limit?' selected':''}>${s} rows</option>`
   ).join('');
   return `<div class="tab-pager">
-    <button onclick="loadTab('${tab}',${Math.max(0,st.offset-st.limit)})" ${cur<=1?'disabled':''}>&#8249;</button>
-    <span class="pager-info">Page ${cur} / ${pages}</span>
-    <button onclick="loadTab('${tab}',${st.offset+st.limit})" ${cur>=pages?'disabled':''}>&#8250;</button>
-    <span class="pager-gap"></span>
-    <select onchange="_tabState['${tab}'].limit=+this.value;loadTab('${tab}',0)">${sizeOpts}</select>
+    <span class="pager-side"></span>
+    <div class="pager-center">
+      <button onclick="loadTab('${tab}',${Math.max(0,st.offset-st.limit)})" ${cur<=1?'disabled':''}>&#8249;</button>
+      <span class="pager-info">Page ${cur} / ${pages}</span>
+      <button onclick="loadTab('${tab}',${st.offset+st.limit})" ${cur>=pages?'disabled':''}>&#8250;</button>
+    </div>
+    <div class="pager-side pager-side-right">
+      <select onchange="_tabState['${tab}'].limit=+this.value;loadTab('${tab}',0)">${sizeOpts}</select>
+    </div>
   </div>`;
 }
 
@@ -278,8 +282,9 @@ window.addEventListener('load', () => loadTab('files'));
   border-top: 1px solid var(--border);
   padding-top: .6rem;
 }
-.pager-info { }
-.pager-gap { flex: 1; }
+.pager-center { display: flex; align-items: center; gap: .5rem; }
+.pager-side { flex: 1; }
+.pager-side-right { display: flex; justify-content: flex-end; }
 .tab-pager button {
   background: var(--surface2);
   border: 1px solid var(--border);
