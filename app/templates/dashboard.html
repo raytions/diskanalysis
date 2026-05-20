@@ -1,0 +1,305 @@
+{% extends "base.html" %}
+{% block title %}Dashboard — DiskAnalysis{% endblock %}
+
+{% block content %}
+<div class="page-header">
+  <h1>Dashboard</h1>
+</div>
+
+<div class="stats-grid">
+  <div class="stat-card">
+    <div class="stat-label">Total Capacity</div>
+    <div class="stat-value">{{ summary.total_bytes | fmt_bytes }}</div>
+  </div>
+  <div class="stat-card">
+    <div class="stat-label">Used</div>
+    <div class="stat-value">{{ summary.used_bytes | fmt_bytes }}</div>
+    <div class="stat-sub">{{ summary.usage_percent }}%</div>
+  </div>
+  <div class="stat-card">
+    <div class="stat-label">Free</div>
+    <div class="stat-value">{{ summary.free_bytes | fmt_bytes }}</div>
+  </div>
+  <div class="stat-card">
+    <div class="stat-label">Mounts</div>
+    <div class="stat-value">{{ summary.mount_count }}</div>
+  </div>
+  <div class="stat-card stat-warn">
+    <div class="stat-label">Cold Data (detected)</div>
+    <div class="stat-value">{{ summary.cold_total_size_bytes | fmt_bytes }}</div>
+    <div class="stat-sub">{{ summary.cold_file_count }} files</div>
+  </div>
+</div>
+
+<div class="two-col" style="margin-bottom:0;">
+  <section class="card">
+    <h2>Highest Usage Mounts</h2>
+    {% if summary.top_mounts %}
+    <div class="table-wrapper"><table class="data-table">
+      <thead><tr><th>Mount</th><th>Used</th><th>Total</th><th>Usage</th></tr></thead>
+      <tbody>
+        {% for m in summary.top_mounts %}
+        <tr>
+          <td><a href="/mounts/{{ m.id }}">{{ m.mount_point }}</a><br><small class="dimmed">{{ m.fs_type }}</small></td>
+          <td>{{ m.used_bytes | fmt_bytes }}</td>
+          <td>{{ m.total_bytes | fmt_bytes }}</td>
+          <td>
+            <div class="usage-bar-wrap">
+              <div class="usage-bar {% if m.usage_percent > 90 %}danger{% elif m.usage_percent > 75 %}warn{% endif %}"
+                   style="width:{{ [m.usage_percent, 100] | min }}%"></div>
+            </div>
+            {{ m.usage_percent }}%
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table></div>
+    {% else %}
+    <p class="empty">No mount data available.</p>
+    {% endif %}
+  </section>
+
+  <section class="card">
+    <h2>Recent Scans</h2>
+    {% if summary.recent_scans %}
+    <div class="table-wrapper"><table class="data-table">
+      <thead><tr><th>ID</th><th>Mode</th><th>Status</th><th>Files</th><th>Duration</th></tr></thead>
+      <tbody>
+        {% for s in summary.recent_scans %}
+        <tr>
+          <td><a href="/scans/{{ s.id }}">#{{ s.id }}</a></td>
+          <td>{{ s.scan_mode }}</td>
+          <td><span class="badge badge-{{ s.status }}">{{ s.status }}</span></td>
+          <td>{{ s.total_files }}</td>
+          <td>{% if s.duration_seconds %}{{ "%.1f"|format(s.duration_seconds) }}s{% else %}—{% endif %}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table></div>
+    {% else %}
+    <p class="empty">No scans yet. Go to Scans to run one.</p>
+    {% endif %}
+  </section>
+</div>
+
+<section class="card" id="global-overview-card" style="margin-bottom:0;padding-top:.75rem;border-top:none;border-radius:0 0 var(--radius) var(--radius);">
+  <div class="tabs" style="margin-bottom:0;">
+    <button class="tab-btn active" onclick="switchDashTab('files',this)">Largest Files</button>
+    <button class="tab-btn" onclick="switchDashTab('dirs',this)">Largest Dirs</button>
+    <button class="tab-btn" onclick="switchDashTab('cold',this)">Cold Files</button>
+    <button class="tab-btn" onclick="switchDashTab('users',this)">By User</button>
+    <button class="tab-btn" onclick="switchDashTab('dupes',this)">Duplicates</button>
+  </div>
+
+  <div id="dtab-files" style="padding-top:.75rem;"><p class="empty">Loading…</p></div>
+  <div id="dtab-dirs"  style="display:none;padding-top:.75rem;"><p class="empty">Loading…</p></div>
+  <div id="dtab-cold"  style="display:none;padding-top:.75rem;"><p class="empty">Loading…</p></div>
+  <div id="dtab-users" style="display:none;padding-top:.75rem;"><p class="empty">Loading…</p></div>
+  <div id="dtab-dupes" style="display:none;padding-top:.75rem;"><p class="empty">Loading…</p></div>
+</section>
+
+<script>
+// ── Tab state ────────────────────────────────────────────
+const TAB_NAMES = ['files','dirs','cold','users','dupes'];
+const _tabState = {};
+TAB_NAMES.forEach(t => _tabState[t] = { loaded: false, limit: 25, offset: 0, total: 0 });
+let _mountMap = {};
+
+function switchDashTab(name, btn) {
+  TAB_NAMES.forEach(t => {
+    document.getElementById('dtab-' + t).style.display = t === name ? '' : 'none';
+  });
+  document.querySelectorAll('#global-overview-card .tab-btn').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+  if (!_tabState[name].loaded) loadTab(name);
+}
+
+// ── Generic tab loader ───────────────────────────────────
+async function loadTab(tab, offset) {
+  const st = _tabState[tab];
+  if (offset !== undefined) st.offset = offset;
+  const container = document.getElementById('dtab-' + tab);
+  container.innerHTML = '<p class="empty">Loading…</p>';
+  try {
+    const r = await fetch(`/api/dashboard/overview-tab?tab=${tab}&limit=${st.limit}&offset=${st.offset}`);
+    const j = await r.json();
+    if (!j.ok) throw new Error(j.error || 'API error');
+    st.total = j.data.total;
+    st.loaded = true;
+    if (j.data.mount_map) _mountMap = Object.assign(_mountMap, j.data.mount_map);
+    renderTab(tab, j.data);
+  } catch(e) {
+    container.innerHTML = `<p class="empty">Failed to load: ${e.message}</p>`;
+    st.loaded = false;
+  }
+}
+
+// ── Pagination ───────────────────────────────────────────
+function buildPager(tab) {
+  const st = _tabState[tab];
+  const pages = Math.ceil(st.total / st.limit) || 1;
+  const cur = Math.floor(st.offset / st.limit) + 1;
+  const sizes = [10, 25, 50, 100];
+  const sizeOpts = sizes.map(s =>
+    `<option value="${s}"${s===st.limit?' selected':''}>${s} rows</option>`
+  ).join('');
+  return `<div class="tab-pager">
+    <button onclick="loadTab('${tab}',${Math.max(0,st.offset-st.limit)})" ${cur<=1?'disabled':''}>&#8249;</button>
+    <span class="pager-info">Page ${cur} / ${pages}</span>
+    <button onclick="loadTab('${tab}',${st.offset+st.limit})" ${cur>=pages?'disabled':''}>&#8250;</button>
+    <select onchange="_tabState['${tab}'].limit=+this.value;loadTab('${tab}',0)">${sizeOpts}</select>
+  </div>`;
+}
+
+// ── Collapsible locations (dupes) ────────────────────────
+let _locSeq = 0;
+function toggleLoc(btn, id) {
+  const el = document.getElementById(id);
+  const open = el.style.display !== 'none';
+  el.style.display = open ? 'none' : '';
+  btn.innerHTML = (open ? '&#9658; ' : '&#9660; ') + btn.dataset.label;
+}
+
+// ── Renderers ────────────────────────────────────────────
+function mountLabel(mid) {
+  return _mountMap[String(mid)] || '—';
+}
+
+function renderTab(tab, data) {
+  const items = data.items;
+  const pager = buildPager(tab);
+  const el = document.getElementById('dtab-' + tab);
+  if (!items.length) { el.innerHTML = '<p class="empty">No data yet.</p>'; return; }
+
+  let html = '';
+
+  if (tab === 'files') {
+    html = `<div class="table-wrapper"><table class="data-table">
+      <thead><tr><th>Path</th><th>Mount</th><th class="num">Size</th><th>Ext</th><th>Modified</th></tr></thead>
+      <tbody>${items.map(f => `<tr>
+        <td class="path-cell" title="${esc(f.path)}">${esc(f.path)}</td>
+        <td class="dimmed" style="white-space:nowrap;font-size:.8rem;">${esc(mountLabel(f.mount_id))}</td>
+        <td class="num">${fmtBytes(f.size_bytes)}</td>
+        <td>${esc(f.extension||'—')}</td>
+        <td class="dimmed">${f.mtime ? fmtTs(f.mtime) : '—'}</td>
+      </tr>`).join('')}</tbody>
+    </table></div>`;
+
+  } else if (tab === 'dirs') {
+    html = `<div class="table-wrapper"><table class="data-table">
+      <thead><tr><th>Directory</th><th>Mount</th><th class="num">Total Size</th><th class="num">Files</th><th class="num">Cold Files</th></tr></thead>
+      <tbody>${items.map(d => `<tr>
+        <td class="path-cell" title="${esc(d.path)}">${esc(d.path)}</td>
+        <td class="dimmed" style="white-space:nowrap;font-size:.8rem;">${esc(mountLabel(d.mount_id))}</td>
+        <td class="num">${fmtBytes(d.total_size_bytes)}</td>
+        <td class="num">${d.file_count.toLocaleString()}</td>
+        <td class="num${d.cold_file_count>0?' warn-text':''}">${d.cold_file_count.toLocaleString()}</td>
+      </tr>`).join('')}</tbody>
+    </table></div>`;
+
+  } else if (tab === 'cold') {
+    html = `<div class="info-banner" style="margin-bottom:.5rem;">&#9432; Files not accessed in 90+ days (atime may be affected by noatime/relatime).</div>
+    <div class="table-wrapper"><table class="data-table">
+      <thead><tr><th>Path</th><th>Mount</th><th class="num">Size</th><th>Ext</th><th>Last Access</th><th>Bucket</th></tr></thead>
+      <tbody>${items.map(f => `<tr>
+        <td class="path-cell" title="${esc(f.path)}">${esc(f.path)}</td>
+        <td class="dimmed" style="white-space:nowrap;font-size:.8rem;">${esc(mountLabel(f.mount_id))}</td>
+        <td class="num">${fmtBytes(f.size_bytes)}</td>
+        <td>${esc(f.extension||'—')}</td>
+        <td class="dimmed">${f.atime ? fmtTs(f.atime) : '—'}</td>
+        <td><span class="badge badge-cold">&gt;${f.cold_days_bucket}d</span></td>
+      </tr>`).join('')}</tbody>
+    </table></div>`;
+
+  } else if (tab === 'users') {
+    html = `<div class="table-wrapper"><table class="data-table">
+      <thead><tr><th>User</th><th class="num">Files</th><th class="num">Total Size</th></tr></thead>
+      <tbody>${items.map(u => {
+        const uids = u.uids ? u.uids.split(',').map(s=>s.trim()).filter(Boolean) : [];
+        // Only show uid tag when username is a real name (not the "uid:N" fallback)
+        const isUidFallback = u.username.startsWith('uid:');
+        const uidTag = (!isUidFallback && uids.length > 0)
+          ? ` <small class="dimmed" style="font-weight:400;">uid{${uids.join(',')}}</small>`
+          : '';
+        return `<tr>
+          <td><strong>${esc(u.username)}</strong>${uidTag}</td>
+          <td class="num">${u.file_count.toLocaleString()}</td>
+          <td class="num">${fmtBytes(u.total_size_bytes)}</td>
+        </tr>`;
+      }).join('')}</tbody>
+    </table></div>`;
+
+  } else if (tab === 'dupes') {
+    html = `<div class="info-banner" style="margin-bottom:.5rem;">&#9432; Files with identical name and exact same size (&ge;1 MB). Wasted = extra copies beyond one.</div>
+    <div class="table-wrapper"><table class="data-table">
+      <thead><tr><th>Filename</th><th class="num">Size</th><th class="num">Copies</th><th class="num">Wasted</th><th>Locations</th></tr></thead>
+      <tbody>${items.map(d => {
+        const lid = 'loc' + (++_locSeq);
+        const label = `${d.count} locations`;
+        return `<tr>
+          <td>${esc(d.filename)}</td>
+          <td class="num">${fmtBytes(d.size_bytes)}</td>
+          <td class="num">${d.count}</td>
+          <td class="num warn-text">${fmtBytes(d.wasted_bytes - d.size_bytes)}</td>
+          <td>
+            <button class="loc-toggle" data-label="${esc(label)}" onclick="toggleLoc(this,'${lid}')">&#9658; ${esc(label)}</button>
+            <div id="${lid}" style="display:none;font-size:.78rem;margin-top:.3rem;color:var(--text-dim);">${d.paths.map(p=>esc(p)).join('<br>')}</div>
+          </td>
+        </tr>`;
+      }).join('')}</tbody>
+    </table></div>`;
+  }
+
+  el.innerHTML = html + pager;
+}
+
+function esc(s) {
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+window.addEventListener('load', () => loadTab('files'));
+</script>
+
+<style>
+.tab-pager {
+  display: flex;
+  align-items: center;
+  gap: .5rem;
+  margin-top: .75rem;
+  font-size: .83rem;
+  color: var(--text-dim);
+  border-top: 1px solid var(--border);
+  padding-top: .6rem;
+}
+.pager-info { flex: 1; text-align: center; }
+.tab-pager button {
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: .2rem .55rem;
+  cursor: pointer;
+  font-size: 1rem;
+  line-height: 1;
+  color: var(--text);
+}
+.tab-pager button:disabled { opacity: .35; cursor: default; }
+.tab-pager select {
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: .2rem .4rem;
+  font-size: .82rem;
+  color: var(--text);
+}
+.loc-toggle {
+  background: none;
+  border: none;
+  cursor: pointer;
+  font-size: .8rem;
+  color: var(--accent);
+  padding: 0;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+</style>
+{% endblock %}

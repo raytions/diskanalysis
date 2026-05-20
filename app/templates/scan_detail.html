@@ -1,0 +1,167 @@
+{% extends "base.html" %}
+{% block title %}Scan #{{ scan.id }} — DiskAnalysis{% endblock %}
+
+{% block content %}
+<div class="page-header">
+  <div>
+    <a href="/scans" class="back-link">&#8592; Scans</a>
+    <h1>Scan #{{ scan.id }}</h1>
+  </div>
+  <div style="display:flex;align-items:center;gap:.75rem;">
+    <span id="status-badge" class="badge badge-{{ scan.status }} badge-lg">{{ scan.status }}</span>
+    {% if scan.status == "running" and (not auth_enabled or is_admin) %}
+    <button id="stop-btn" class="btn btn-danger btn-sm" onclick="stopScan()">&#9632; Stop</button>
+    {% endif %}
+  </div>
+</div>
+
+{% if scan.status == "running" %}
+<div class="info-banner" id="progress-banner">
+  &#9654; 扫描进行中…
+  <span id="progress-files" style="margin-left:1rem;font-weight:600;"></span>
+  <span id="current-mount" style="margin-left:1rem;font-family:monospace;font-size:.85rem;opacity:.7;"></span>
+</div>
+{% endif %}
+
+<div class="detail-grid" id="detail-grid">
+  <div class="detail-row"><span class="detail-label">Mode</span><span>{{ scan.scan_mode }}</span></div>
+  <div class="detail-row"><span class="detail-label">当前/目标</span><span class="mono" id="val-target">{{ scan.target_path or 'all mounts' }}</span></div>
+  <div class="detail-row"><span class="detail-label">Started</span><span>{{ scan.started_at.strftime('%Y-%m-%d %H:%M:%S') }}</span></div>
+  <div class="detail-row"><span class="detail-label">Finished</span><span id="val-finished">{{ scan.finished_at.strftime('%Y-%m-%d %H:%M:%S') if scan.finished_at else '—' }}</span></div>
+  <div class="detail-row"><span class="detail-label">Duration</span><span id="val-duration">{% if scan.duration_seconds %}{{ "%.2f"|format(scan.duration_seconds) }}s{% else %}—{% endif %}</span></div>
+  <div class="detail-row"><span class="detail-label">Files scanned</span><span class="num" id="val-files">{{ scan.total_files }}</span></div>
+  <div class="detail-row"><span class="detail-label">Directories</span><span class="num" id="val-dirs">{{ scan.total_dirs }}</span></div>
+  <div class="detail-row"><span class="detail-label">Total size</span><span id="val-size">{{ scan.total_bytes | fmt_bytes }}</span></div>
+  <div class="detail-row"><span class="detail-label">Errors</span><span class="num {% if scan.error_count > 0 %}warn-text{% endif %}" id="val-errors">{{ scan.error_count }}</span></div>
+  <div class="detail-row"><span class="detail-label">One-filesystem</span><span>{{ scan.filesystem_boundary_only }}</span></div>
+  <div class="detail-row"><span class="detail-label">Cold threshold</span><span>{{ scan.cold_days }} days</span></div>
+  <div class="detail-row"><span class="detail-label">Exclude rules</span><span class="mono">{{ scan.exclude_rules or '—' }}</span></div>
+  {% if scan.error_summary %}
+  <div class="detail-row"><span class="detail-label">Error summary</span><span class="warn-text">{{ scan.error_summary }}</span></div>
+  {% endif %}
+</div>
+
+{% if errors %}
+<section class="card" style="margin-top:1.5rem;">
+  <h2>Errors ({{ errors | length }})</h2>
+  <div class="table-wrapper"><table class="data-table">
+    <thead><tr><th>Path</th><th>Type</th><th>Message</th></tr></thead>
+    <tbody>
+      {% for e in errors %}
+      <tr>
+        <td class="path-cell">{{ e.path or '—' }}</td>
+        <td><code>{{ e.error_type }}</code></td>
+        <td class="dimmed">{{ e.error_message }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table></div>
+</section>
+{% endif %}
+
+{% if scan.mount_id %}
+<div style="margin-top:1rem;">
+  <a href="/mounts/{{ scan.mount_id }}" class="btn">View Mount Detail</a>
+</div>
+{% endif %}
+
+<script>
+const scanId = {{ scan.id }};
+const STARTED_AT_MS = {{ (scan.started_at.timestamp() * 1000) | int }};
+let status = '{{ scan.status }}';
+let durationTimer = null;
+
+function fmtB(n) {
+  if (!n) return '0 B';
+  const units = ['B','KB','MB','GB','TB','PB'];
+  let i = 0;
+  while (n >= 1024 && i < units.length - 1) { n /= 1024; i++; }
+  return n.toFixed(1) + ' ' + units[i];
+}
+
+function updateLiveDuration() {
+  const el = document.getElementById('val-duration');
+  if (el) el.textContent = ((Date.now() - STARTED_AT_MS) / 1000).toFixed(0) + 's';
+}
+
+if (status === 'running') {
+  durationTimer = setInterval(updateLiveDuration, 1000);
+  updateLiveDuration();
+
+  async function poll() {
+    try {
+      const r = await fetch('/api/scans/' + scanId);
+      const j = await r.json();
+      if (!j.ok) return;
+      const d = j.data;
+
+      document.getElementById('val-files').textContent = d.total_files.toLocaleString();
+      document.getElementById('val-dirs').textContent = d.total_dirs.toLocaleString();
+      document.getElementById('val-size').textContent = fmtB(d.total_bytes);
+      document.getElementById('val-errors').textContent = d.error_count;
+      document.getElementById('progress-files').textContent =
+        d.total_files.toLocaleString() + ' files · ' + fmtB(d.total_bytes);
+      const targetEl = document.getElementById('val-target');
+      if (targetEl && d.target_path) targetEl.textContent = d.target_path;
+      const cmEl = document.getElementById('current-mount');
+      if (cmEl && d.target_path) cmEl.textContent = '→ ' + d.target_path;
+
+      if (d.status !== 'running') {
+        clearInterval(durationTimer); durationTimer = null;
+        status = d.status;
+        const badge = document.getElementById('status-badge');
+        badge.textContent = d.status;
+        badge.className = 'badge badge-' + d.status + ' badge-lg';
+        const stopBtn = document.getElementById('stop-btn');
+        if (stopBtn) stopBtn.remove();
+
+        if (d.finished_at) {
+          document.getElementById('val-finished').textContent =
+            new Date(d.finished_at).toLocaleString();
+        }
+        if (d.duration_seconds != null) {
+          document.getElementById('val-duration').textContent =
+            d.duration_seconds.toFixed(2) + 's';
+        }
+
+        const banner = document.getElementById('progress-banner');
+        if (banner) {
+          if (d.status === 'completed') {
+            banner.className = 'success-banner';
+            banner.textContent = '✓ 扫描完成 — ' + d.total_files.toLocaleString() + ' 个文件，' + fmtB(d.total_bytes);
+          } else if (d.status === 'stopped') {
+            banner.className = 'info-banner';
+            banner.textContent = '■ 扫描已停止 — ' + d.total_files.toLocaleString() + ' 个文件';
+          } else {
+            banner.className = 'error-banner';
+            banner.textContent = '✗ 扫描失败';
+          }
+        }
+        return; // stop polling
+      }
+    } catch(e) { /* ignore network errors during polling */ }
+    setTimeout(poll, 2000);
+  }
+
+  setTimeout(poll, 2000);
+}
+
+async function stopScan() {
+  const btn = document.getElementById('stop-btn');
+  if (!btn) return;
+  if (!confirm('Stop this scan?\nProgress so far (files scanned) will be saved.')) return;
+  btn.disabled = true; btn.textContent = 'Stopping…';
+  try {
+    const r = await fetch('/api/scans/' + scanId + '/stop', {method: 'POST'});
+    const j = await r.json();
+    if (!j.ok) {
+      alert('Error: ' + (j.error || r.status));
+      btn.disabled = false; btn.textContent = '■ Stop';
+    }
+  } catch(e) {
+    alert('Error: ' + e.message);
+    btn.disabled = false; btn.textContent = '■ Stop';
+  }
+}
+</script>
+{% endblock %}

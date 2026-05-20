@@ -1,0 +1,30 @@
+services:
+  web:
+    build: .
+    restart: unless-stopped
+    privileged: true          # needed to read /proc/mounts and access NFS/network filesystems
+    ports:
+      - "${APP_PORT:-8000}:8000"
+    volumes:
+      - ./data:/data          # persistent DB and state
+      # ── Mount directories to scan (add your paths below, :ro keeps them read-only) ──
+      # - /media/nas01:/media/nas01:ro
+      # - /media/nas02:/media/nas02:ro
+      # - /mnt/data:/mnt/data:ro
+      # - /proc:/proc:ro        # needed for /proc/mounts auto-discovery
+    environment:
+      - DB_PATH=/data/diskanalysis.db
+      - APP_HOST=0.0.0.0
+      - APP_PORT=8000
+      - DEFAULT_COLD_DAYS=${DEFAULT_COLD_DAYS:-90}
+      - DEFAULT_TOP_N=${DEFAULT_TOP_N:-100}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - NETWORK_FS_TYPES=${NETWORK_FS_TYPES:-nfs,nfs4,cifs,smb3,smbfs,davfs,samba,fuse.sshfs,fuse.s3fs,glusterfs,cephfs,lustre}
+      - ADMIN_PASSWORD=${ADMIN_PASSWORD:-}
+    env_file:
+      - .env
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8000/api/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3

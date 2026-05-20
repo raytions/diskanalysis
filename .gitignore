@@ -1,0 +1,23 @@
+# Database
+data/
+
+# Environment & secrets
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+
+# Claude Code / OpenWolf session files
+.claude/
+.wolf/
+
+# OS
+.DS_Store
+Thumbs.db

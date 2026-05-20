@@ -1,0 +1,180 @@
+{% extends "base.html" %}
+{% block title %}Run Scan — DiskAnalysis{% endblock %}
+
+{% block content %}
+<div class="page-header">
+  <h1>Run Scan</h1>
+</div>
+
+<div class="card" style="max-width:720px;">
+  <form id="scan-form" onsubmit="submitScan(event)">
+    <div class="form-group">
+      <label>Scan Mode</label>
+      <select name="scan_mode" id="scan_mode" onchange="onModeChange()">
+        <option value="selected_mounts">Select Mounts</option>
+        <option value="all_mounts">All Mounts</option>
+        <option value="path">Specific Path</option>
+      </select>
+    </div>
+
+    <div class="form-group">
+      <label>Scan Type</label>
+      <select name="scan_type" id="scan_type">
+        <option value="full">Full Scan — index all files</option>
+        <option value="incremental">Incremental — only files changed since last scan</option>
+      </select>
+      <div class="hint" id="scan-type-hint" style="display:none;">
+        Incremental scan skips files whose mtime hasn't changed since the previous completed scan of the same path. Useful for detecting recent changes quickly.
+      </div>
+    </div>
+
+    <!-- Mount multi-select (shown for selected_mounts mode) -->
+    <div class="form-group" id="group-mounts">
+      <label style="margin-bottom:.5rem;">
+        Mounts to Scan
+        <span style="font-weight:400;font-size:.8rem;color:var(--text-dim);margin-left:.5rem;">
+          <a href="#" onclick="toggleAll(true);return false;">全选</a> /
+          <a href="#" onclick="toggleAll(false);return false;">全不选</a>
+        </span>
+      </label>
+      <div id="mount-list" style="border:1px solid var(--border);border-radius:6px;max-height:320px;overflow-y:auto;padding:.25rem 0;">
+        {% for m in mounts %}
+        {% if m.is_accessible %}
+        <label class="mount-row" style="display:flex;align-items:center;gap:.6rem;padding:.4rem .75rem;cursor:pointer;{% if not m.is_accessible %}opacity:.4;{% endif %}">
+          <input type="checkbox" name="mount_ids" value="{{ m.id }}"
+            {% if m.mount_point != '/' %}checked{% endif %}
+            {% if not m.is_accessible %}disabled{% endif %} />
+          <span style="flex:1;min-width:0;">
+            <span style="font-family:monospace;font-size:.85rem;">{{ m.mount_point }}</span>
+            <span style="color:var(--text-dim);font-size:.75rem;margin-left:.4rem;">{{ m.fs_type }}</span>
+            {% if m.is_network_fs %}<span class="badge" style="font-size:.65rem;padding:1px 5px;background:var(--accent-blue,#3b82f6);color:#fff;border-radius:3px;margin-left:.25rem;">NFS</span>{% endif %}
+          </span>
+          <span style="font-size:.78rem;color:var(--text-dim);white-space:nowrap;">{{ m.used_bytes | fmt_bytes }} / {{ m.total_bytes | fmt_bytes }}</span>
+        </label>
+        {% endif %}
+        {% endfor %}
+      </div>
+    </div>
+
+    <div class="form-group" id="group-path" style="display:none;">
+      <label>Target Path</label>
+      <input type="text" name="target_path" id="target_path" placeholder="/mnt/nas1/projectA" />
+    </div>
+
+    <div class="form-group">
+      <label>Cold Data Threshold</label>
+      <select name="cold_days">
+        {% for d in [30, 90, 180, 365] %}
+        <option value="{{ d }}" {% if d == default_cold_days %}selected{% endif %}>{{ d }} days</option>
+        {% endfor %}
+      </select>
+    </div>
+
+    <div class="form-group">
+      <label>
+        <input type="checkbox" name="filesystem_boundary_only" id="fs_boundary" checked />
+        Stay within filesystem boundary (recommended)
+      </label>
+      <div class="hint">Prevents descending into other mounts nested under the target.</div>
+    </div>
+
+    <div class="form-group">
+      <label>Exclude Paths (comma-separated)</label>
+      <input type="text" name="exclude_rules" placeholder="/tmp,*.cache" />
+    </div>
+
+    <div class="form-actions">
+      <button type="submit" class="btn btn-primary" id="submit-btn">&#9654; Start Scan</button>
+      <span id="status-msg" style="margin-left:.75rem;font-size:.85rem;color:var(--text-dim);"></span>
+    </div>
+  </form>
+
+  <div id="scan-result" style="display:none; margin-top:1rem;"></div>
+</div>
+
+<style>
+.mount-row:hover { background: var(--bg-hover, rgba(255,255,255,.04)); }
+</style>
+
+<script>
+function onModeChange() {
+  const mode = document.getElementById('scan_mode').value;
+  document.getElementById('group-mounts').style.display = mode === 'selected_mounts' ? '' : 'none';
+  document.getElementById('group-path').style.display = mode === 'path' ? '' : 'none';
+}
+
+document.getElementById('scan_type').addEventListener('change', function() {
+  document.getElementById('scan-type-hint').style.display = this.value === 'incremental' ? 'block' : 'none';
+});
+
+function toggleAll(checked) {
+  document.querySelectorAll('#mount-list input[type=checkbox]').forEach(cb => {
+    if (!cb.disabled) cb.checked = checked;
+  });
+}
+
+async function submitScan(e) {
+  e.preventDefault();
+  const btn = document.getElementById('submit-btn');
+  const msg = document.getElementById('status-msg');
+  btn.disabled = true;
+  btn.textContent = 'Starting…';
+  msg.textContent = '';
+
+  const form = e.target;
+  const mode = form.scan_mode.value;
+  const data = {
+    scan_mode: mode,
+    scan_type: form.scan_type.value,
+    cold_days: parseInt(form.cold_days.value),
+    filesystem_boundary_only: form.fs_boundary.checked,
+    exclude_rules: form.exclude_rules.value.trim() || null,
+  };
+
+  if (mode === 'selected_mounts') {
+    const ids = [...document.querySelectorAll('#mount-list input[type=checkbox]:checked')].map(cb => parseInt(cb.value));
+    if (ids.length === 0) { showErr('请至少选择一个挂载点'); btn.disabled = false; btn.textContent = '▶ Start Scan'; return; }
+    data.mount_ids = ids;
+  }
+  if (mode === 'path') {
+    const p = form.target_path.value.trim();
+    if (!p) { showErr('请输入路径'); btn.disabled = false; btn.textContent = '▶ Start Scan'; return; }
+    data.target_path = p;
+  }
+
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 20000);
+
+  try {
+    const r = await fetch('/api/scans', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(data),
+      signal: ctrl.signal,
+    });
+    clearTimeout(timer);
+    const j = await r.json();
+    if (j.ok) {
+      window.location.href = '/scans/' + j.data.id;
+    } else {
+      showErr('Error: ' + (j.error || r.status));
+      btn.disabled = false; btn.textContent = '▶ Start Scan';
+    }
+  } catch (err) {
+    clearTimeout(timer);
+    if (err.name === 'AbortError') {
+      showErr('请求超时，请检查服务器日志');
+    } else {
+      showErr('请求失败: ' + err.message);
+    }
+    btn.disabled = false; btn.textContent = '▶ Start Scan';
+  }
+}
+
+function showErr(msg) {
+  const el = document.getElementById('scan-result');
+  el.innerHTML = '<div class="error-banner">' + msg + '</div>';
+  el.style.display = '';
+}
+</script>
+{% endblock %}

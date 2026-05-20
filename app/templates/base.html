@@ -1,0 +1,64 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="light">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>{% block title %}DiskAnalysis{% endblock %}</title>
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+<nav class="navbar">
+  <div class="nav-brand">
+    <span class="nav-icon">&#128190;</span>
+    <a href="/" class="nav-title">DiskAnalysis</a>
+  </div>
+  <ul class="nav-links">
+    <li><a href="/" {% if request.url.path == "/" %}class="active"{% endif %}>Dashboard</a></li>
+    <li><a href="/mounts" {% if "/mounts" in request.url.path and "/scans" not in request.url.path and "/trigger" not in request.url.path %}class="active"{% endif %}>Mounts</a></li>
+    <li><a href="/scans" {% if "/scans" in request.url.path or "/trigger" in request.url.path %}class="active"{% endif %}>Scans</a></li>
+  </ul>
+  {% if not auth_enabled %}
+    <span style="color:#86efac;font-size:.8rem;margin-right:.5rem;">&#10003; Admin</span>
+  {% elif is_admin %}
+    <span style="color:#86efac;font-size:.8rem;margin-right:.5rem;">&#10003; Admin</span>
+    <a href="/logout" style="color:var(--nav-text);font-size:.8rem;padding:.25rem .5rem;border:1px solid rgba(255,255,255,.2);border-radius:4px;text-decoration:none;">Logout</a>
+  {% else %}
+    <a href="/login" style="color:var(--nav-text);font-size:.8rem;padding:.25rem .5rem;border:1px solid rgba(255,255,255,.2);border-radius:4px;text-decoration:none;">Admin Login</a>
+  {% endif %}
+  <button id="theme-toggle" onclick="toggleTheme()" title="Toggle dark mode">&#9680;</button>
+</nav>
+
+<main class="container">
+  {% block content %}{% endblock %}
+</main>
+
+<footer class="footer">
+  <span>DiskAnalysis &mdash; self-hosted disk panel</span>
+</footer>
+
+<script>
+function toggleTheme() {
+  const html = document.documentElement;
+  html.dataset.theme = html.dataset.theme === 'dark' ? 'light' : 'dark';
+  localStorage.setItem('theme', html.dataset.theme);
+}
+(function() {
+  const saved = localStorage.getItem('theme');
+  if (saved) document.documentElement.dataset.theme = saved;
+})();
+
+function fmtBytes(n) {
+  if (n == null) return '—';
+  const units = ['B','KB','MB','GB','TB','PB'];
+  let i = 0;
+  while (Math.abs(n) >= 1024 && i < units.length - 1) { n /= 1024; i++; }
+  return n.toFixed(1) + ' ' + units[i];
+}
+
+function fmtTs(ts) {
+  if (!ts) return '—';
+  return new Date(ts * 1000).toISOString().replace('T', ' ').slice(0, 19);
+}
+</script>
+</body>
+</html>

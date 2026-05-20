@@ -1,0 +1,28 @@
+[Unit]
+Description=DiskAnalysis Scanner — daily at 02:00
+Requires=diskscan.service
+
+[Timer]
+# Every day at 02:00 local time
+OnCalendar=*-*-* 02:00:00
+Persistent=true
+RandomizedDelaySec=300
+
+[Install]
+WantedBy=timers.target
+
+# --- Additional timer examples ---
+#
+# Weekly cold-data scan (Sunday 01:00):
+#   OnCalendar=Sun *-*-* 01:00:00
+#
+# To create separate timers for individual mounts, copy this file and
+# change ExecStart in the .service to:
+#   ExecStart=/usr/bin/python3 -m app.scanner scan --mount /mnt/nas1
+#
+# Enable with:
+#   sudo systemctl enable --now diskscan.timer
+#
+# cron equivalent (add to /etc/cron.d/diskanalysis):
+#   0 2 * * * root cd /opt/diskanalysis && python3 -m app.scanner scan --all-mounts >> /var/log/diskanalysis.log 2>&1
+#   0 1 * * 0 root cd /opt/diskanalysis && python3 -m app.scanner scan --mount /mnt/nas1 --cold-days 90 >> /var/log/diskanalysis.log 2>&1

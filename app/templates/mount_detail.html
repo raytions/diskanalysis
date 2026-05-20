@@ -1,0 +1,461 @@
+{% extends "base.html" %}
+{% block title %}{{ mount.mount_point }} — DiskAnalysis{% endblock %}
+
+{% block content %}
+<div class="page-header">
+  <div>
+    <a href="/mounts" class="back-link">&#8592; Mounts</a>
+    <h1>{{ mount.mount_point }}</h1>
+    <div class="meta-row">
+      <code>{{ mount.device }}</code>
+      <span class="badge">{{ mount.fs_type }}</span>
+      {% if mount.is_network_fs %}<span class="badge badge-net">Network</span>{% endif %}
+      {% if not mount.is_accessible %}<span class="badge badge-danger">Inaccessible</span>{% endif %}
+    </div>
+  </div>
+  <div class="header-actions">
+    <button id="scan-this-btn" class="btn btn-primary" onclick="scanThis()">&#9654; Scan This</button>
+    {% if not auth_enabled or is_admin %}
+    <button class="btn" id="unmount-btn" onclick="unmountThis()">Unmount</button>
+    {% endif %}
+    <a href="/api/exports/mounts/{{ mount.id }}.json" class="btn">JSON</a>
+    <a href="/api/exports/mounts/{{ mount.id }}.csv" class="btn">CSV</a>
+  </div>
+</div>
+
+<!-- Capacity -->
+<div class="stats-grid">
+  <div class="stat-card">
+    <div class="stat-label">Total</div>
+    <div class="stat-value">{{ mount.total_bytes | fmt_bytes }}</div>
+  </div>
+  <div class="stat-card">
+    <div class="stat-label">Used</div>
+    <div class="stat-value">{{ mount.used_bytes | fmt_bytes }}</div>
+    <div class="usage-bar-wrap wide">
+      <div class="usage-bar {% if mount.usage_percent > 90 %}danger{% elif mount.usage_percent > 75 %}warn{% endif %}"
+           style="width:{{ [mount.usage_percent,100]|min }}%"></div>
+    </div>
+    <div class="stat-sub">{{ mount.usage_percent }}%</div>
+  </div>
+  <div class="stat-card">
+    <div class="stat-label">Free</div>
+    <div class="stat-value">{{ mount.free_bytes | fmt_bytes }}</div>
+  </div>
+  {% if total_files is not none %}
+  <div class="stat-card">
+    <div class="stat-label">Files</div>
+    <div class="stat-value">{{ "{:,}".format(total_files) }}</div>
+  </div>
+  {% endif %}
+  {% if total_dirs is not none %}
+  <div class="stat-card">
+    <div class="stat-label">Directories</div>
+    <div class="stat-value">{{ "{:,}".format(total_dirs) }}</div>
+  </div>
+  {% endif %}
+</div>
+
+<!-- Global filter bar -->
+<div class="filter-bar filter-bar-inline" style="gap:.75rem;align-items:center;">
+  <label class="filter-label">Cold threshold
+    <select id="sel-cold" onchange="reloadTab()">
+      {% for d in [30, 90, 180, 365] %}
+      <option value="{{ d }}" {% if d == cold_days %}selected{% endif %}>{{ d }} days</option>
+      {% endfor %}
+    </select>
+  </label>
+  <label class="filter-label">Rows per page
+    <select id="sel-topn" onchange="reloadTab()">
+      {% for n in [25, 50, 100, 200] %}
+      <option value="{{ n }}" {% if n == top_n %}selected{% endif %}>{{ n }}</option>
+      {% endfor %}
+    </select>
+  </label>
+  <!-- Search with icon inside input -->
+  <div style="position:relative;display:inline-flex;align-items:center;margin-left:auto;">
+    <input type="text" id="global-search" placeholder="Search path…"
+      style="padding:.3rem 1.9rem .3rem .6rem;border:1px solid var(--border);border-radius:var(--radius);background:var(--surface);color:var(--text);font-size:.83rem;width:200px;outline:none;"
+      onkeydown="if(event.key==='Enter') applySearch();"
+      oninput="if(!this.value) applySearch();" />
+    <svg onclick="applySearch()" style="position:absolute;right:.5rem;cursor:pointer;color:var(--text-dim);width:14px;height:14px;flex-shrink:0;" viewBox="0 0 20 20" fill="currentColor">
+      <path fill-rule="evenodd" d="M9 3.5a5.5 5.5 0 100 11 5.5 5.5 0 000-11zM2 9a7 7 0 1112.452 4.391l3.328 3.329a.75.75 0 11-1.06 1.06l-3.329-3.328A7 7 0 012 9z" clip-rule="evenodd"/>
+    </svg>
+  </div>
+</div>
+
+<div class="tabs">
+  <button class="tab-btn active" onclick="switchTab('files', this)">Largest Files</button>
+  <button class="tab-btn" onclick="switchTab('dirs', this)">Largest Dirs</button>
+  <button class="tab-btn" onclick="switchTab('cold', this)">Cold Files</button>
+  <button class="tab-btn" onclick="switchTab('users', this)">By User</button>
+  <button class="tab-btn" onclick="switchTab('ext', this)">By Extension</button>
+  <button class="tab-btn" onclick="switchTab('history', this)">Scan History</button>
+</div>
+
+<div id="tab-files"   class="tab-content active"></div>
+<div id="tab-dirs"    class="tab-content"></div>
+<div id="tab-cold"    class="tab-content"></div>
+<div id="tab-users"   class="tab-content"></div>
+<div id="tab-ext"     class="tab-content"></div>
+<div id="tab-history" class="tab-content"></div>
+
+<style>
+.pagination { display:flex; gap:.4rem; align-items:center; justify-content:center; margin-top:.75rem; font-size:.85rem; flex-wrap:wrap; }
+.pagination button { padding:.25rem .65rem; border:1px solid var(--border); border-radius:4px; background:var(--surface); color:var(--text); cursor:pointer; font-size:.82rem; }
+.pagination button:disabled { opacity:.35; cursor:default; }
+.pagination .page-info { color:var(--text-dim); padding:0 .5rem; min-width:80px; text-align:center; }
+.data-table th.sortable { cursor:pointer; user-select:none; white-space:nowrap; }
+.data-table th.sortable:hover { color:var(--accent); }
+.data-table th.sort-asc::after  { content:' ▲'; font-size:.7em; }
+.data-table th.sort-desc::after { content:' ▼'; font-size:.7em; }
+</style>
+
+<script>
+const MOUNT_ID = {{ mount.id }};
+const IS_ADMIN = {{ 'true' if (is_admin or not auth_enabled) else 'false' }};
+let currentTab = 'files';
+
+const tabState = {};
+function getState(name, defaultSort) {
+  if (!tabState[name]) tabState[name] = { offset: 0, sortBy: defaultSort, sortDir: 'desc', total: null };
+  return tabState[name];
+}
+
+function coldDays() { return parseInt(document.getElementById('sel-cold').value); }
+function pageSize()  { return parseInt(document.getElementById('sel-topn').value); }
+function searchQ()   { return document.getElementById('global-search').value.trim(); }
+
+function applySearch() {
+  Object.keys(tabState).forEach(k => { if (tabState[k]) { tabState[k].offset = 0; tabState[k].total = null; } });
+  renderCurrentTab();
+}
+
+function reloadTab() {
+  Object.keys(tabState).forEach(k => { if (tabState[k]) { tabState[k].offset = 0; tabState[k].total = null; } });
+  renderCurrentTab();
+}
+
+function switchTab(name, btn) {
+  document.querySelectorAll('.tab-content').forEach(e => e.classList.remove('active'));
+  document.querySelectorAll('.tab-btn').forEach(e => e.classList.remove('active'));
+  document.getElementById('tab-' + name).classList.add('active');
+  btn.classList.add('active');
+  currentTab = name;
+  renderCurrentTab();
+}
+
+function renderCurrentTab() { renderTab(currentTab); }
+
+async function renderTab(name) {
+  const el = document.getElementById('tab-' + name);
+  el.innerHTML = '<div class="loading">Loading…</div>';
+  try { await fetchAndRender(name, el); }
+  catch(e) { el.innerHTML = '<p class="empty">Load error: ' + escHtml(e.message) + '</p>'; }
+}
+
+async function fetchAndRender(name, el) {
+  switch(name) {
+    case 'files':   return renderFiles(el, MOUNT_ID, pageSize());
+    case 'dirs':    return renderDirs(el, MOUNT_ID, pageSize());
+    case 'cold':    return renderCold(el, MOUNT_ID, pageSize(), coldDays());
+    case 'users':   return renderUsers(el, MOUNT_ID);
+    case 'ext':     return renderExt(el, MOUNT_ID);
+    case 'history': return renderHistory(el, MOUNT_ID);
+    default: el.innerHTML = '<p class="empty">Unknown tab</p>';
+  }
+}
+
+async function apiFetch(url) {
+  const r = await fetch(url);
+  const j = await r.json();
+  if (!j.ok) throw new Error(j.error || r.status);
+  return j.data;
+}
+
+function escHtml(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+function fmtIso(iso) { return iso ? iso.replace('T',' ').slice(0,16) : '—'; }
+
+// ── Pagination ──────────────────────────────────────────
+function buildPager(tabName, renderFn) {
+  const s = tabState[tabName];
+  const n = pageSize();
+  const total = s.total;
+  const offset = s.offset;
+  const canPrev = offset > 0;
+  const page = Math.floor(offset / n) + 1;
+  const totalPages = total != null ? Math.max(1, Math.ceil(total / n)) : null;
+  const canNext = total != null ? page < totalPages : (s._hasMore !== false);
+
+  const pageInfo = totalPages != null
+    ? `Page ${page} / ${totalPages}`
+    : `Page ${page}`;
+
+  return `<div class="pagination">
+    <button ${canPrev ? '' : 'disabled'} onclick="tabState['${tabName}'].offset=0;${renderFn}">&#171;</button>
+    <button ${canPrev ? '' : 'disabled'} onclick="tabState['${tabName}'].offset=Math.max(0,tabState['${tabName}'].offset-${n});${renderFn}">&#8249;</button>
+    <span class="page-info">${pageInfo}</span>
+    <button ${canNext ? '' : 'disabled'} onclick="tabState['${tabName}'].offset+=tabState['${tabName}'].offset+${n}<${total??Infinity}?${n}:0;${renderFn}">&#8250;</button>
+    <button ${canNext && totalPages ? '' : 'disabled'} onclick="tabState['${tabName}'].offset=${totalPages != null ? '('+totalPages+'-1)*'+n : 'tabState[\''+tabName+'\'].offset'};${renderFn}">&#187;</button>
+  </div>`;
+}
+
+function sortHeader(label, col, tabName, cls, renderFn) {
+  const s = tabState[tabName];
+  const active = s && s.sortBy === col;
+  const nextDir = active && s.sortDir === 'desc' ? 'asc' : 'desc';
+  const sortCls = [cls, 'sortable', active ? 'sort-' + s.sortDir : ''].filter(Boolean).join(' ');
+  return `<th class="${sortCls}" onclick="tabState['${tabName}'].sortBy='${col}';tabState['${tabName}'].sortDir='${nextDir}';tabState['${tabName}'].offset=0;tabState['${tabName}'].total=null;${renderFn}">${label}</th>`;
+}
+
+// ── Tab renderers ────────────────────────────────────────
+
+async function renderFiles(el, id, n) {
+  const s = getState('files', 'size_bytes');
+  const sq = searchQ();
+  const needCount = s.total === null;
+  const qs = `?limit=${n}&offset=${s.offset}&sort_by=${s.sortBy}&sort_dir=${s.sortDir}&count=${needCount}` + (sq ? `&search=${encodeURIComponent(sq)}` : '');
+  const data = await apiFetch(`/api/mounts/${id}/largest-files${qs}`);
+  if (data.total !== null) s.total = data.total;
+  const rows = data.files || [];
+  const render = "renderTab('files')";
+  if (!rows.length) { el.innerHTML = '<p class="empty">No file data. Run a scan to populate.</p>'; return; }
+  el.innerHTML = `<div class="table-wrapper"><table class="data-table">
+    <thead><tr>
+      <th>Path</th>
+      ${sortHeader('Size','size_bytes','files','num',render)}
+      <th>Ext</th>
+      ${sortHeader('Modified','mtime','files','',render)}
+    </tr></thead>
+    <tbody>${rows.map(f => `<tr>
+      <td class="path-cell" title="${escHtml(f.path)}">${escHtml(f.path)}</td>
+      <td class="num">${fmtBytes(f.size_bytes)}</td>
+      <td>${escHtml(f.extension || '—')}</td>
+      <td class="dimmed">${fmtTs(f.mtime)}</td>
+    </tr>`).join('')}</tbody></table></div>` + buildPager('files', render);
+}
+
+async function renderDirs(el, id, n) {
+  const s = getState('dirs', 'total_size_bytes');
+  const sq = searchQ();
+  const needCount = s.total === null;
+  const qs = `?limit=${n}&offset=${s.offset}&sort_by=${s.sortBy}&sort_dir=${s.sortDir}&count=${needCount}` + (sq ? `&search=${encodeURIComponent(sq)}` : '');
+  const data = await apiFetch(`/api/mounts/${id}/largest-directories${qs}`);
+  if (data.total !== null) s.total = data.total;
+  const rows = data.dirs || [];
+  const render = "renderTab('dirs')";
+  if (!rows.length) { el.innerHTML = '<p class="empty">No directory data. Directory stats are written after a full scan completes.</p>'; return; }
+  el.innerHTML = `<div class="table-wrapper"><table class="data-table">
+    <thead><tr>
+      <th>Directory</th>
+      ${sortHeader('Total Size','total_size_bytes','dirs','num',render)}
+      ${sortHeader('Files','file_count','dirs','num',render)}
+      ${sortHeader('Cold Files','cold_file_count','dirs','num',render)}
+    </tr></thead>
+    <tbody>${rows.map(d => `<tr>
+      <td class="path-cell" title="${escHtml(d.path)}">${escHtml(d.path)}</td>
+      <td class="num">${fmtBytes(d.total_size_bytes)}</td>
+      <td class="num">${d.file_count.toLocaleString()}</td>
+      <td class="num ${d.cold_file_count > 0 ? 'warn-text' : ''}">${d.cold_file_count.toLocaleString()}</td>
+    </tr>`).join('')}</tbody></table></div>` + buildPager('dirs', render);
+}
+
+async function renderCold(el, id, n, cd) {
+  const s = getState('cold', 'size_bytes');
+  const sq = searchQ();
+  const qs = `?days=${cd}&limit=${n}&offset=${s.offset}&sort_by=${s.sortBy}&sort_dir=${s.sortDir}` + (sq ? `&search=${encodeURIComponent(sq)}` : '');
+  const data = await apiFetch(`/api/mounts/${id}/cold-files${qs}`);
+  s.total = data.total_count || null;
+  const rows = data.files || [];
+  const render = "renderTab('cold')";
+  const banner = `<div class="info-banner">&#9432; atime may be affected by noatime/relatime mount options.</div>`;
+  if (!rows.length && s.offset === 0) {
+    el.innerHTML = banner + `<p class="empty">No cold files found.</p>`; return;
+  }
+  const statsHtml = data.total_count != null
+    ? `<div class="stats-row"><span><strong>${data.total_count.toLocaleString()}</strong> cold files</span><span><strong>${fmtBytes(data.total_size_bytes)}</strong></span><span class="dimmed">threshold &gt; ${cd} days</span></div>`
+    : '';
+  el.innerHTML = banner + statsHtml + `<div class="table-wrapper"><table class="data-table">
+    <thead><tr>
+      <th>Path</th>
+      ${sortHeader('Size','size_bytes','cold','num',render)}
+      ${sortHeader('Last Access','atime','cold','',render)}
+      <th>Bucket</th>
+    </tr></thead>
+    <tbody>${rows.map(f => `<tr>
+      <td class="path-cell" title="${escHtml(f.path)}">${escHtml(f.path)}</td>
+      <td class="num">${fmtBytes(f.size_bytes)}</td>
+      <td class="dimmed">${fmtTs(f.atime)}</td>
+      <td><span class="badge badge-cold">&gt;${f.cold_days_bucket}d</span></td>
+    </tr>`).join('')}</tbody></table></div>` + buildPager('cold', render);
+}
+
+async function renderUsers(el, id) {
+  const data = await apiFetch(`/api/mounts/${id}/user-summary`);
+  if (!data || !data.length) { el.innerHTML = '<p class="empty">No user data. Run a scan first.</p>'; return; }
+  el.innerHTML = `<div class="table-wrapper"><table class="data-table">
+    <thead><tr><th>User</th><th class="num">UID</th><th class="num">Files</th><th class="num">Total Size</th></tr></thead>
+    <tbody>${data.map(u => `<tr>
+      <td><strong>${escHtml(u.username)}</strong></td>
+      <td class="num dimmed">${u.uid ?? '—'}</td>
+      <td class="num">${u.file_count.toLocaleString()}</td>
+      <td class="num">${fmtBytes(u.total_size_bytes)}</td>
+    </tr>`).join('')}</tbody></table></div>`;
+}
+
+async function renderExt(el, id) {
+  const data = await apiFetch(`/api/mounts/${id}/extension-summary?limit=50`);
+  if (!data || !data.length) { el.innerHTML = '<p class="empty">No extension data yet.</p>'; return; }
+  el.innerHTML = `<div class="table-wrapper"><table class="data-table">
+    <thead><tr><th>Extension</th><th class="num">Files</th><th class="num">Total Size</th></tr></thead>
+    <tbody>${data.map(e => `<tr>
+      <td><code>${escHtml(e.extension)}</code></td>
+      <td class="num">${e.file_count.toLocaleString()}</td>
+      <td class="num">${fmtBytes(e.total_size_bytes)}</td>
+    </tr>`).join('')}</tbody></table></div>`;
+}
+
+// ── Scan History with multi-select delete ────────────────
+let histScans = [], histSel = new Set(), histLast = null;
+
+async function renderHistory(el, id) {
+  histScans = []; histSel.clear(); histLast = null;
+  const data = await apiFetch(`/api/mounts/${id}/scans?limit=50`);
+  histScans = data.items || data || [];
+  if (!histScans.length) { el.innerHTML = '<p class="empty">No scans for this mount yet.</p>'; return; }
+  drawHistoryTable(el);
+}
+
+function drawHistoryTable(el) {
+  const adminTools = IS_ADMIN ? `
+    <div id="hist-sel-bar" style="display:none;align-items:center;gap:.5rem;margin-bottom:.5rem;font-size:.83rem;">
+      <span id="hist-sel-count" style="color:var(--text-dim);"></span>
+      <button onclick="deleteHistSel()" style="background:none;border:none;cursor:pointer;color:var(--danger);font-size:1rem;padding:.1rem .25rem;" title="Delete selected">&#128465;</button>
+      <button onclick="clearHistSel()" style="background:none;border:none;cursor:pointer;color:var(--text-dim);font-size:.85rem;padding:.1rem .25rem;">&#10005;</button>
+    </div>` : '';
+
+  el.innerHTML = adminTools + `<div class="table-wrapper"><table class="data-table" id="hist-table">
+    <thead><tr><th>ID</th><th>Started</th><th>Status</th><th class="num">Files</th><th class="num">Size</th><th class="num">Duration</th><th class="num">Errors</th></tr></thead>
+    <tbody>${histScans.map((s, i) => `<tr data-idx="${i}" onclick="handleHistClick(event, this)" style="${IS_ADMIN ? 'cursor:pointer;' : ''}">
+      <td><a href="/scans/${s.id}" onclick="event.stopPropagation()">#${s.id}</a></td>
+      <td class="dimmed">${fmtIso(s.started_at)}</td>
+      <td><span class="badge badge-${s.status}">${s.status}</span></td>
+      <td class="num">${(s.total_files||0).toLocaleString()}</td>
+      <td class="num">${fmtBytes(s.total_bytes)}</td>
+      <td class="num">${s.duration_seconds != null ? s.duration_seconds.toFixed(1)+'s' : '—'}</td>
+      <td class="num ${s.error_count > 0 ? 'warn-text' : ''}">${s.error_count}</td>
+    </tr>`).join('')}</tbody></table></div>`;
+}
+
+function handleHistClick(event, row) {
+  if (!IS_ADMIN || event.target.tagName === 'A') return;
+  const idx = parseInt(row.dataset.idx);
+  if (event.shiftKey && histLast !== null) {
+    const all = [...document.querySelectorAll('#hist-table tbody tr')];
+    const a = all.indexOf(histLast), b = all.indexOf(row);
+    const [lo, hi] = a < b ? [a, b] : [b, a];
+    all.slice(lo, hi+1).forEach(r => { histSel.add(parseInt(r.dataset.idx)); r.classList.add('row-selected'); });
+  } else {
+    if (histSel.has(idx)) { histSel.delete(idx); row.classList.remove('row-selected'); }
+    else { histSel.add(idx); row.classList.add('row-selected'); }
+    histLast = row;
+  }
+  updateHistSelBar();
+}
+
+function updateHistSelBar() {
+  const bar = document.getElementById('hist-sel-bar');
+  if (!bar) return;
+  if (histSel.size > 0) {
+    bar.style.display = 'flex';
+    document.getElementById('hist-sel-count').textContent = histSel.size + ' selected';
+  } else { bar.style.display = 'none'; }
+}
+
+function clearHistSel() {
+  histSel.clear();
+  document.querySelectorAll('#hist-table tbody tr.row-selected').forEach(r => r.classList.remove('row-selected'));
+  updateHistSelBar();
+}
+
+async function deleteHistSel() {
+  if (!histSel.size) return;
+  const ids = [...histSel].map(i => histScans[i].id);
+  if (!confirm(`Delete ${ids.length} scan record(s) and all their file data?`)) return;
+  try {
+    const r = await fetch('/api/scans', {
+      method: 'DELETE',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(ids),
+    });
+    const j = await r.json();
+    if (!j.ok) { alert('Delete failed: ' + escHtml(j.error || 'unknown')); return; }
+  } catch(e) { alert('Error: ' + escHtml(e.message)); return; }
+  // Remove rows immediately; deletion runs in background
+  histScans = histScans.filter((s, i) => !histSel.has(i));
+  histSel.clear(); histLast = null;
+  const el = document.getElementById('tab-history');
+  drawHistoryTable(el);
+  updateHistSelBar();
+  showDelToast(ids.length + ' scan(s) queued for deletion — running in background.');
+}
+
+function showDelToast(msg) {
+  const t = document.createElement('div');
+  t.textContent = msg;
+  t.style.cssText = 'position:fixed;bottom:1.5rem;right:1.5rem;background:var(--nav-bg);color:#c9d1e0;padding:.75rem 1.1rem;border-radius:6px;font-size:.83rem;z-index:9999;max-width:380px;box-shadow:0 4px 16px rgba(0,0,0,.35);transition:opacity .4s;';
+  document.body.appendChild(t);
+  setTimeout(() => { t.style.opacity = '0'; setTimeout(() => t.remove(), 400); }, 3600);
+}
+
+async function unmountThis() {
+  const btn = document.getElementById('unmount-btn');
+  if (!btn) return;
+  if (!confirm('Unmount {{ mount.mount_point }}?\n\nThis will disconnect the filesystem. Only works for mounts made by the same user as the web server.')) return;
+  btn.disabled = true; btn.textContent = 'Unmounting…';
+  try {
+    const r = await fetch('/api/mounts/{{ mount.id }}/unmount', {method:'POST'});
+    const j = await r.json();
+    if (j.data.unmounted) {
+      btn.textContent = '✓ Unmounted';
+      setTimeout(() => location.reload(), 800);
+    } else {
+      btn.textContent = 'Unmount';
+      btn.disabled = false;
+      alert('Unmount failed: ' + (j.data.error || 'unknown') + '\n\nFor root-mounted filesystems, run:\nsudo umount {{ mount.mount_point }}');
+    }
+  } catch(e) { btn.disabled = false; btn.textContent = 'Unmount'; alert('Error: ' + e.message); }
+}
+
+async function scanThis() {
+  const btn = document.getElementById('scan-this-btn');
+  btn.disabled = true; btn.textContent = 'Starting…';
+  try {
+    const r = await fetch('/api/scans', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        scan_mode: 'single_mount',
+        mount_id: MOUNT_ID,
+        scan_type: 'full',
+        cold_days: {{ cold_days }},
+        filesystem_boundary_only: true,
+      }),
+    });
+    const j = await r.json();
+    if (j.ok) {
+      window.location.href = '/scans/' + j.data.id;
+    } else {
+      alert('Failed to start scan: ' + (j.error || 'unknown'));
+      btn.disabled = false; btn.innerHTML = '&#9654; Scan This';
+    }
+  } catch(e) {
+    alert('Error: ' + e.message);
+    btn.disabled = false; btn.innerHTML = '&#9654; Scan This';
+  }
+}
+
+// Load first tab
+renderTab('files');
+</script>
+{% endblock %}

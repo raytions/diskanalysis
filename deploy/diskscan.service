@@ -1,0 +1,16 @@
+[Unit]
+Description=DiskAnalysis Scanner — one-shot scan job
+After=network.target
+
+[Service]
+Type=oneshot
+# Adjust User/WorkingDirectory to match your deployment
+User=root
+WorkingDirectory=/opt/diskanalysis
+Environment=DB_PATH=/opt/diskanalysis/data/diskanalysis.db
+ExecStart=/usr/bin/python3 -m app.scanner scan --all-mounts
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
