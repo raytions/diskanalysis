@@ -65,29 +65,47 @@ def dashboard_overview_tab(
         items = [_file_dict(f) for f in rows]
 
     elif tab == "users":
-        # Group by stored username (merged across servers); aggregate all UIDs seen under that name
+        import pwd as _pwd
+        from collections import defaultdict
         sid_in = ",".join(str(s) for s in sids)
-        user_sql = f"""
-            SELECT COALESCE(username, 'uid:' || CAST(uid AS TEXT)) AS uname,
+        # Aggregate per-uid first, then resolve username in Python and re-merge
+        uid_sql = f"""
+            SELECT uid,
+                   MAX(username) AS stored_username,
                    COUNT(*) AS file_count,
-                   SUM(size_bytes) AS total_size_bytes,
-                   GROUP_CONCAT(DISTINCT CAST(uid AS TEXT)) AS uids
+                   SUM(size_bytes) AS total_size_bytes
             FROM files
             WHERE scan_id IN ({sid_in})
-            GROUP BY uname
-            ORDER BY total_size_bytes DESC
-            LIMIT :limit OFFSET :offset
-        """
-        count_sql = f"""
-            SELECT COUNT(*) FROM (
-              SELECT 1 FROM files WHERE scan_id IN ({sid_in})
-              GROUP BY COALESCE(username, 'uid:' || CAST(uid AS TEXT))
-            )
+            GROUP BY uid
         """
         with db.bind.connect() as conn:
-            raw_rows = conn.execute(sqlt(user_sql), {"limit": limit, "offset": offset}).fetchall()
-            total = conn.execute(sqlt(count_sql)).fetchone()[0]
-        items = [{"username": r[0], "file_count": r[1], "total_size_bytes": r[2] or 0, "uids": r[3]} for r in raw_rows]
+            uid_rows = conn.execute(sqlt(uid_sql)).fetchall()
+
+        # Resolve username: use stored value if present, else look up via pwd
+        agg = defaultdict(lambda: {"file_count": 0, "total_size_bytes": 0, "uids": set()})
+        for uid, stored_name, fc, ts in uid_rows:
+            if stored_name:
+                name = stored_name
+            elif uid is not None:
+                try:
+                    name = _pwd.getpwuid(uid).pw_name
+                except (KeyError, TypeError):
+                    name = f"uid:{uid}"
+            else:
+                name = "unknown"
+            agg[name]["file_count"] += fc or 0
+            agg[name]["total_size_bytes"] += ts or 0
+            if uid is not None:
+                agg[name]["uids"].add(str(uid))
+
+        all_users = sorted(
+            [{"username": n, "file_count": v["file_count"], "total_size_bytes": v["total_size_bytes"],
+              "uids": ",".join(sorted(v["uids"], key=lambda x: int(x) if x.isdigit() else 0))}
+             for n, v in agg.items()],
+            key=lambda x: -x["total_size_bytes"],
+        )
+        total = len(all_users)
+        items = all_users[offset: offset + limit]
 
     elif tab == "dupes":
         # Exact filename + exact size; min 1 MB; basename via registered SQLite UDF

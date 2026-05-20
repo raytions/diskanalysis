@@ -213,16 +213,21 @@ function renderTab(tab, data) {
 
   } else if (tab === 'users') {
     html = `<div class="table-wrapper"><table class="data-table">
-      <thead><tr><th>User</th><th class="num">Files</th><th class="num">Total Size</th></tr></thead>
+      <thead><tr><th>User</th><th class="num dimmed">UID</th><th class="num">Files</th><th class="num">Total Size</th></tr></thead>
       <tbody>${items.map(u => {
         const uids = u.uids ? u.uids.split(',').map(s=>s.trim()).filter(Boolean) : [];
-        // Only show uid tag when username is a real name (not the "uid:N" fallback)
         const isUidFallback = u.username.startsWith('uid:');
-        const uidTag = (!isUidFallback && uids.length > 0)
-          ? ` <small class="dimmed" style="font-weight:400;">uid{${uids.join(',')}}</small>`
-          : '';
+        // Username column: real name or fallback label without "uid:" prefix
+        const nameCell = isUidFallback
+          ? `<span class="dimmed">${esc(u.username)}</span>`
+          : `<strong>${esc(u.username)}</strong>`;
+        // UID column: single number or {N,M,...} for multiple
+        const uidCell = uids.length > 1
+          ? `{${uids.join(',')}}`
+          : (uids[0] || '—');
         return `<tr>
-          <td><strong>${esc(u.username)}</strong>${uidTag}</td>
+          <td>${nameCell}</td>
+          <td class="num dimmed" style="font-size:.82rem;">${uidCell}</td>
           <td class="num">${u.file_count.toLocaleString()}</td>
           <td class="num">${fmtBytes(u.total_size_bytes)}</td>
         </tr>`;
