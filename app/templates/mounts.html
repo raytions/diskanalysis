@@ -198,8 +198,8 @@
     </select>
   </label>
   {% if not auth_enabled or is_admin %}
-  <span id="sel-label" style="display:none;margin-left:auto;font-size:.82rem;color:var(--text-dim);"></span>
-  <button type="button" id="sel-delete" class="btn btn-danger btn-sm" style="display:none;" onclick="deleteSelected()">Delete</button>
+  <span id="sel-label" style="margin-left:auto;font-size:.82rem;color:var(--text-dim);visibility:hidden;"></span>
+  <button type="button" id="sel-delete" class="btn btn-danger btn-sm" disabled onclick="deleteSelected()">Delete</button>
   {% endif %}
 </form>
 
@@ -500,10 +500,11 @@ function updateSelectionUI() {
   const btn = document.getElementById('sel-delete');
   if (!label) return;
   if (selected.size > 0) {
-    label.style.display = ''; label.textContent = selected.size + ' selected';
-    btn.style.display = '';
+    label.style.visibility = ''; label.textContent = selected.size + ' selected';
+    btn.disabled = false;
   } else {
-    label.style.display = 'none'; btn.style.display = 'none';
+    label.style.visibility = 'hidden'; label.textContent = '';
+    btn.disabled = true;
   }
 }
 

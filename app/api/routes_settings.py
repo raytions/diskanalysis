@@ -41,6 +41,8 @@ def update_settings(req: SettingRequest, request: Request, db: Session = Depends
     return ok({"path_user_attribution": req.path_user_attribution})
 
 
+# ── Confirmed users ───────────────────────────────────────────────────────────
+
 @router.get("/users")
 def list_custom_users(db: Session = Depends(get_db)):
     with db.bind.connect() as conn:
@@ -92,8 +94,8 @@ def bulk_delete_users(req: BulkDeleteRequest, request: Request, db: Session = De
 
 
 class AliasRequest(BaseModel):
-    names: List[str]   # all names to merge (must all exist or be valid)
-    primary: str       # canonical primary name (must be in names)
+    names: List[str]
+    primary: str
 
 
 @router.post("/users/alias")
@@ -104,10 +106,8 @@ def set_user_alias(req: AliasRequest, request: Request, db: Session = Depends(ge
         return JSONResponse({"ok": False, "error": "Select at least 2 entries to alias"}, status_code=400)
 
     aliases = [n for n in req.names if n != req.primary]
-    aliases_str = ",".join(aliases)
 
     with db.bind.connect() as conn:
-        # Collect existing aliases of all merged entries so we don't lose them
         existing_aliases: set[str] = set()
         for name in req.names:
             row = conn.execute(text("SELECT aliases FROM custom_users WHERE username=:u"), {"u": name}).fetchone()
@@ -120,12 +120,10 @@ def set_user_alias(req: AliasRequest, request: Request, db: Session = Depends(ge
         all_aliases = list(existing_aliases) + aliases
         final_aliases_str = ",".join(all_aliases)
 
-        # Upsert primary with combined aliases
         conn.execute(text(
             "INSERT INTO custom_users (username, aliases, created_at) VALUES (:u, :a, datetime('now')) "
             "ON CONFLICT(username) DO UPDATE SET aliases=:a"
         ), {"u": req.primary, "a": final_aliases_str})
-        # Remove alias entries (now represented under primary)
         for alias in aliases:
             conn.execute(text("DELETE FROM custom_users WHERE username=:u"), {"u": alias})
         conn.commit()
@@ -133,9 +131,54 @@ def set_user_alias(req: AliasRequest, request: Request, db: Session = Depends(ge
     return ok({"primary": req.primary, "aliases": all_aliases})
 
 
+# ── Candidates (populated by sync) ────────────────────────────────────────────
+
+@router.get("/candidates")
+def list_candidates(db: Session = Depends(get_db)):
+    with db.bind.connect() as conn:
+        rows = conn.execute(text(
+            "SELECT username, created_at FROM user_candidates ORDER BY username"
+        )).fetchall()
+    return ok({
+        "items": [{"username": r[0], "created_at": r[1]} for r in rows],
+        "total": len(rows),
+    })
+
+
+class PromoteRequest(BaseModel):
+    usernames: List[str]
+
+
+@router.post("/candidates/promote")
+def promote_candidates(req: PromoteRequest, request: Request, db: Session = Depends(get_db), _=Depends(auth.require_admin)):
+    if not req.usernames:
+        return JSONResponse({"ok": False, "error": "No usernames provided"}, status_code=400)
+    with db.bind.connect() as conn:
+        for name in req.usernames:
+            conn.execute(text(
+                "INSERT OR IGNORE INTO custom_users (username, aliases, created_at) VALUES (:u, '', datetime('now'))"
+            ), {"u": name})
+            conn.execute(text("DELETE FROM user_candidates WHERE username=:u"), {"u": name})
+        conn.commit()
+    return ok({"promoted": len(req.usernames)})
+
+
+@router.delete("/candidates")
+def dismiss_candidates(req: BulkDeleteRequest, request: Request, db: Session = Depends(get_db), _=Depends(auth.require_admin)):
+    if not req.usernames:
+        return JSONResponse({"ok": False, "error": "No usernames provided"}, status_code=400)
+    with db.bind.connect() as conn:
+        for name in req.usernames:
+            conn.execute(text("DELETE FROM user_candidates WHERE username=:u"), {"u": name})
+        conn.commit()
+    return ok({"dismissed": len(req.usernames)})
+
+
+# ── Sync ──────────────────────────────────────────────────────────────────────
+
 @router.post("/users/sync")
 def sync_users_from_scans(request: Request, db: Session = Depends(get_db), _=Depends(auth.require_admin)):
-    """Collect directory names from scan data + non-system /etc/passwd users."""
+    """Collect directory names from scan data + non-system /etc/passwd users into candidates table."""
     import pwd
     from app.models import Mount
     from app.services.analytics import _latest_scan_id_for_mount
@@ -185,7 +228,7 @@ def sync_users_from_scans(request: Request, db: Session = Depends(get_db), _=Dep
         except Exception:
             pass
 
-        # ── Also uid-resolved names from files ────────────────────────────────
+        # ── uid-resolved names from files ─────────────────────────────────────
         uid_rows = conn.execute(text(
             "SELECT DISTINCT uid, MAX(username) FROM files WHERE uid IS NOT NULL GROUP BY uid"
         )).fetchall()
@@ -201,14 +244,25 @@ def sync_users_from_scans(request: Request, db: Session = Depends(get_db), _=Dep
                     except (KeyError, TypeError):
                         pass
 
-        # ── Insert new names (skip existing) ─────────────────────────────────
+        # ── Skip names already in confirmed list ──────────────────────────────
+        confirmed = {r[0] for r in conn.execute(text("SELECT username FROM custom_users")).fetchall()}
+        # Also collect all alias names so we don't re-surface them as candidates
+        for row in conn.execute(text("SELECT aliases FROM custom_users WHERE aliases != ''")).fetchall():
+            for a in row[0].split(","):
+                a = a.strip()
+                if a:
+                    confirmed.add(a)
+
+        # ── Insert new candidates (skip existing and confirmed) ───────────────
         added = 0
         for name in sorted(names):
+            if name in confirmed:
+                continue
             result = conn.execute(text(
-                "INSERT OR IGNORE INTO custom_users (username, aliases, created_at) VALUES (:u, '', datetime('now'))"
+                "INSERT OR IGNORE INTO user_candidates (username, created_at) VALUES (:u, datetime('now'))"
             ), {"u": name})
             added += result.rowcount
         conn.commit()
 
-    logger.info("Synced %d user candidates, added %d new to custom_users", len(names), added)
+    logger.info("Synced %d candidates, added %d new", len(names), added)
     return ok({"candidates": len(names), "added": added})

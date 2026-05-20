@@ -176,3 +176,13 @@ def _migrate(eng):
             conn.execute(text("ALTER TABLE custom_users ADD COLUMN aliases TEXT DEFAULT ''"))
             conn.commit()
             logger.info("Migrated: added custom_users.aliases column")
+
+        # Candidates table — populated by sync, never used directly for attribution
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS user_candidates (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                username TEXT NOT NULL UNIQUE,
+                created_at TEXT DEFAULT (datetime('now'))
+            )
+        """))
+        conn.commit()

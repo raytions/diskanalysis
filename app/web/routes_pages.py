@@ -147,11 +147,15 @@ def settings_page(request: Request, db: Session = Depends(get_db)):
         users = conn.execute(text(
             "SELECT username, aliases, created_at FROM custom_users ORDER BY username"
         )).fetchall()
+        candidates = conn.execute(text(
+            "SELECT username, created_at FROM user_candidates ORDER BY username"
+        )).fetchall()
     return _tr(request, "settings.html", {
         "path_user_attribution": path_attr,
         "users": [{"username": r[0],
                    "aliases": [a.strip() for a in (r[1] or "").split(",") if a.strip()],
                    "created_at": r[2]} for r in users],
+        "candidates": [{"username": r[0], "created_at": r[1]} for r in candidates],
     })
 
 

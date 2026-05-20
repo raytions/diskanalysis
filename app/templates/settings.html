@@ -14,16 +14,14 @@
     <h2>User Attribution</h2>
     <p style="color:var(--text-dim);font-size:.87rem;margin-bottom:1rem;line-height:1.6;">
       When enabled, files are attributed to users by matching the top-level directory name
-      against the user list — before falling back to uid. Handles NFS4 mounts where all
-      files share the same system uid regardless of actual owner.
-      <br>Example: <code>/media/NAS02/jiahao/</code> → <strong>jiahao</strong>.
+      against the confirmed user list — before falling back to uid. Handles NFS4 mounts
+      where all files share the same system uid regardless of actual owner.
     </p>
-
     {% if can_admin %}
     <div class="setting-row">
       <div>
         <div class="setting-label">Path-based attribution</div>
-        <div class="setting-hint">Match top-level directory names against the user list</div>
+        <div class="setting-hint">Match top-level directory names against confirmed users</div>
       </div>
       <label class="toggle-switch">
         <input type="checkbox" id="path-attr-toggle" {% if path_user_attribution %}checked{% endif %}
@@ -45,85 +43,129 @@
     {% endif %}
   </section>
 
-  <!-- ── Custom User List ─────────────────────────────────────── -->
-  <section class="card" id="user-list-card">
-    <div style="display:flex;align-items:center;gap:.75rem;flex-wrap:wrap;margin-bottom:.75rem;">
-      <h2 style="margin:0;">Custom User List</h2>
+  <!-- ── User panels (side by side) ──────────────────────────── -->
+  <div class="user-panels">
+
+    <!-- ── Confirmed Users ──────────────────────────────────── -->
+    <section class="card" id="confirmed-panel">
+      <h2 style="margin-bottom:.35rem;">Confirmed Users</h2>
+      <p style="color:var(--text-dim);font-size:.84rem;margin-bottom:.9rem;line-height:1.5;">
+        Authoritative list used for path-based attribution. Add usernames here manually or
+        promote from candidates. Use aliases to merge variant names under one primary.
+      </p>
+
       {% if can_admin %}
-      <button class="btn btn-sm" onclick="syncFromScans()" id="sync-btn">&#8635; Sync from scans</button>
-      {% endif %}
-    </div>
-    <p style="color:var(--text-dim);font-size:.85rem;margin-bottom:1rem;line-height:1.6;">
-      Usernames here are used for directory-prefix attribution. Adding <em>yyfang</em> matches
-      <code>/yyfangspx/</code>, <code>/yyfang2023/</code>, etc. Use aliases to merge variant
-      names under one primary. Changes take effect immediately — no restart needed.
-    </p>
-
-    {% if can_admin %}
-    <!-- Add row -->
-    <div style="display:flex;gap:.5rem;margin-bottom:.75rem;">
-      <input type="text" id="new-user" placeholder="username" class="settings-input"
-             onkeydown="if(event.key==='Enter')addUser()" />
-      <button class="btn btn-primary btn-sm" onclick="addUser()">+ Add</button>
-    </div>
-    <div id="add-msg" style="font-size:.82rem;margin-bottom:.5rem;min-height:1.2em;"></div>
-
-    <!-- Selection action bar (hidden until rows are selected) -->
-    <div id="sel-bar" class="sel-bar" style="display:none;">
-      <span id="sel-count" style="font-weight:600;"></span>
-      <span style="flex:1;"></span>
-      <button class="btn btn-sm" id="alias-btn" onclick="openAliasPanel()" style="display:none;">&#10697; Alias</button>
-      <button class="btn btn-danger btn-sm" onclick="bulkDelete()">&#128465; Delete</button>
-    </div>
-
-    <!-- Alias panel (hidden until alias action) -->
-    <div id="alias-panel" class="alias-panel" style="display:none;">
-      <div style="font-size:.87rem;font-weight:600;margin-bottom:.5rem;">Select primary username:</div>
-      <div id="alias-radio-list" style="display:flex;flex-direction:column;gap:.35rem;margin-bottom:.75rem;"></div>
-      <div style="display:flex;gap:.5rem;">
-        <button class="btn btn-primary btn-sm" onclick="confirmAlias()">Confirm Alias</button>
-        <button class="btn btn-sm" onclick="closeAliasPanel()">Cancel</button>
+      <div style="display:flex;gap:.5rem;margin-bottom:.6rem;">
+        <input type="text" id="new-user" placeholder="username" class="settings-input"
+               onkeydown="if(event.key==='Enter')addUser()" />
+        <button class="btn btn-primary btn-sm" onclick="addUser()">+ Add</button>
       </div>
-      <div id="alias-msg" style="font-size:.82rem;margin-top:.4rem;min-height:1em;"></div>
-    </div>
-    {% endif %}
+      <div id="add-msg" style="font-size:.82rem;margin-bottom:.4rem;min-height:1.1em;"></div>
 
-    <!-- Table -->
-    <div id="user-list-wrap">
-    {% if users %}
-    <div class="table-wrapper">
-    <table class="data-table" id="users-table">
-      <thead>
-        <tr>
-          {% if can_admin %}<th style="width:36px;"><input type="checkbox" id="check-all" onchange="toggleAll(this.checked)"></th>{% endif %}
-          <th>Username</th>
-          <th>Aliases</th>
-          <th>Added</th>
-        </tr>
-      </thead>
-      <tbody id="users-tbody">
-        {% for u in users %}
-        <tr id="row-{{ u.username }}" data-name="{{ u.username }}" onclick="{% if can_admin %}handleRowClick(event, this){% endif %}" {% if can_admin %}style="cursor:pointer;"{% endif %}>
-          {% if can_admin %}<td style="text-align:center;vertical-align:middle;" onclick="event.stopPropagation();if(event.target.tagName!=='INPUT')toggleRow(this.parentElement);"><input type="checkbox" class="row-check" onchange="this.closest('tr').classList.toggle('row-selected',this.checked);updateSelBar()"></td>{% endif %}
-          <td><code style="font-size:.85rem;">{{ u.username }}</code></td>
-          <td>
-            {% for alias in u.aliases %}
-            <span class="alias-tag">{{ alias }}</span>
+      <!-- Confirmed selection bar -->
+      <div id="csel-bar" class="sel-bar" style="display:none;">
+        <span id="csel-count" style="font-weight:600;"></span>
+        <span style="flex:1;"></span>
+        <button class="btn btn-sm" id="alias-btn" onclick="openAliasPanel()" style="display:none;">&#10697; Alias</button>
+        <button class="btn btn-danger btn-sm" onclick="bulkDeleteConfirmed()">&#128465; Delete</button>
+      </div>
+
+      <!-- Alias panel -->
+      <div id="alias-panel" class="alias-panel" style="display:none;">
+        <div style="font-size:.87rem;font-weight:600;margin-bottom:.5rem;">Select primary username:</div>
+        <div id="alias-radio-list" style="display:flex;flex-direction:column;gap:.35rem;margin-bottom:.75rem;"></div>
+        <div style="display:flex;gap:.5rem;">
+          <button class="btn btn-primary btn-sm" onclick="confirmAlias()">Confirm Alias</button>
+          <button class="btn btn-sm" onclick="closeAliasPanel()">Cancel</button>
+        </div>
+        <div id="alias-msg" style="font-size:.82rem;margin-top:.4rem;min-height:1em;"></div>
+      </div>
+      {% endif %}
+
+      <div class="table-wrapper" id="confirmed-wrap">
+        {% if users %}
+        <table class="data-table sel-table" id="confirmed-table">
+          <thead>
+            <tr>
+              <th>Username</th>
+              <th>Aliases</th>
+              <th style="white-space:nowrap;">Added</th>
+            </tr>
+          </thead>
+          <tbody id="confirmed-tbody">
+            {% for u in users %}
+            <tr id="crow-{{ u.username }}" data-name="{{ u.username }}"
+                {% if can_admin %}onclick="rowClick(event,'confirmed',this)"{% endif %}
+                {% if can_admin %}class="selectable-row"{% endif %}>
+              <td><code style="font-size:.85rem;">{{ u.username }}</code></td>
+              <td>
+                {% for alias in u.aliases %}
+                <span class="alias-tag">{{ alias }}</span>
+                {% endfor %}
+              </td>
+              <td class="dimmed" style="font-size:.79rem;white-space:nowrap;">{{ u.created_at or '—' }}</td>
+            </tr>
             {% endfor %}
-          </td>
-          <td class="dimmed" style="font-size:.8rem;white-space:nowrap;">{{ u.created_at or '—' }}</td>
-        </tr>
-        {% endfor %}
-      </tbody>
-    </table>
-    </div>
-    {% else %}
-    <p class="empty" id="empty-msg">No custom users yet. Add usernames above or use "Sync from scans".</p>
-    {% endif %}
-    </div>
+          </tbody>
+        </table>
+        {% else %}
+        <p class="empty" id="confirmed-empty">No confirmed users yet. Add manually or promote from candidates.</p>
+        {% endif %}
+      </div>
+    </section>
 
-    <div id="sync-result" style="margin-top:.75rem;"></div>
-  </section>
+    <!-- ── Candidates ─────────────────────────────────────────── -->
+    <section class="card" id="candidates-panel">
+      <div style="display:flex;align-items:center;gap:.75rem;flex-wrap:wrap;margin-bottom:.35rem;">
+        <h2 style="margin:0;">Candidates</h2>
+        {% if can_admin %}
+        <button class="btn btn-sm" onclick="syncFromScans()" id="sync-btn">&#8635; Sync from scans</button>
+        {% endif %}
+      </div>
+      <p style="color:var(--text-dim);font-size:.84rem;margin-bottom:.9rem;line-height:1.5;">
+        Names discovered from scan directories and <code>/etc/passwd</code>. Review and promote
+        real users to the confirmed list. Syncing refreshes this list without touching confirmed users.
+      </p>
+
+      {% if can_admin %}
+      <!-- Candidates selection bar -->
+      <div id="ksel-bar" class="sel-bar sel-bar-candidates" style="display:none;">
+        <span id="ksel-count" style="font-weight:600;"></span>
+        <span style="flex:1;"></span>
+        <button class="btn btn-sm" onclick="promoteSelected()">&#10003; Add to Confirmed</button>
+        <button class="btn btn-danger btn-sm" onclick="dismissSelected()">&#10005; Dismiss</button>
+      </div>
+      {% endif %}
+
+      <div id="sync-result" style="margin-bottom:.5rem;"></div>
+
+      <div class="table-wrapper" id="candidates-wrap">
+        {% if candidates %}
+        <table class="data-table sel-table" id="candidates-table">
+          <thead>
+            <tr>
+              <th>Username</th>
+              <th style="white-space:nowrap;">Discovered</th>
+            </tr>
+          </thead>
+          <tbody id="candidates-tbody">
+            {% for c in candidates %}
+            <tr id="krow-{{ c.username }}" data-name="{{ c.username }}"
+                {% if can_admin %}onclick="rowClick(event,'candidates',this)"{% endif %}
+                {% if can_admin %}class="selectable-row"{% endif %}>
+              <td><code style="font-size:.85rem;">{{ c.username }}</code></td>
+              <td class="dimmed" style="font-size:.79rem;white-space:nowrap;">{{ c.created_at or '—' }}</td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+        {% else %}
+        <p class="empty" id="candidates-empty">No candidates yet. Click "Sync from scans" to discover usernames.</p>
+        {% endif %}
+      </div>
+    </section>
+
+  </div><!-- /.user-panels -->
 
 </div>
 
@@ -139,10 +181,10 @@
 .toggle-switch input:checked + .toggle-slider { background:var(--accent); }
 .toggle-switch input:checked + .toggle-slider::before { transform:translateX(18px); }
 
-/* ── Input (dark-mode fix) ── */
+/* ── Dark-mode input ── */
 .settings-input {
   flex: 1;
-  max-width: 260px;
+  max-width: 240px;
   padding: .4rem .65rem;
   border: 1px solid var(--border);
   border-radius: var(--radius);
@@ -153,6 +195,23 @@
 }
 .settings-input::placeholder { color: var(--text-dim); }
 .settings-input:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+
+/* ── Side-by-side panels ── */
+.user-panels {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 1.25rem;
+  align-items: start;
+}
+@media (max-width: 900px) {
+  .user-panels { grid-template-columns: 1fr; }
+}
+
+/* ── Row selection (no checkboxes) ── */
+.sel-table tbody tr.selectable-row { cursor: pointer; user-select: none; }
+.sel-table tbody tr.selectable-row:hover { background: var(--surface2); }
+.sel-table tbody tr.row-selected { background: #dbeafe !important; }
+[data-theme="dark"] .sel-table tbody tr.row-selected { background: #1e3a5f !important; }
 
 /* ── Selection bar ── */
 .sel-bar {
@@ -169,6 +228,7 @@
 .sel-bar .btn { background:rgba(255,255,255,.2);border-color:rgba(255,255,255,.4);color:#fff; }
 .sel-bar .btn:hover { background:rgba(255,255,255,.3); }
 .sel-bar .btn-danger { background:rgba(220,38,38,.8);border-color:rgba(220,38,38,.9); }
+.sel-bar-candidates { background: #059669; }
 
 /* ── Alias panel ── */
 .alias-panel {
@@ -193,89 +253,91 @@
   margin-right: .2rem;
   font-family: monospace;
 }
-
-/* ── Row selected ── */
-#users-table tbody tr.row-selected { background: #eff6ff !important; }
-[data-theme="dark"] #users-table tbody tr.row-selected { background: #1e3a5f !important; }
 </style>
 
 <script>
-// ── Multi-select state ─────────────────────────────────
-let _lastClicked = null;
+// ── Per-table selection state ──────────────────────────────────
+const _sel = { confirmed: new Set(), candidates: new Set() };
+let _lastClicked = { confirmed: null, candidates: null };
 
-function handleRowClick(e, row) {
-  if (e.target.tagName === 'INPUT') return;
-  if (e.shiftKey && _lastClicked) {
-    const rows = [...document.querySelectorAll('#users-tbody tr')];
-    const a = rows.indexOf(_lastClicked), b = rows.indexOf(row);
+function rowClick(e, which, row) {
+  const rows = [...document.querySelectorAll(`#${which === 'confirmed' ? 'confirmed' : 'candidates'}-tbody tr`)];
+  const name = row.dataset.name;
+
+  if (e.shiftKey && _lastClicked[which]) {
+    const a = rows.indexOf(_lastClicked[which]), b = rows.indexOf(row);
     const [lo, hi] = a < b ? [a, b] : [b, a];
-    rows.slice(lo, hi + 1).forEach(r => { r.querySelector('.row-check').checked = true; r.classList.add('row-selected'); });
+    rows.slice(lo, hi + 1).forEach(r => {
+      _sel[which].add(r.dataset.name);
+      r.classList.add('row-selected');
+    });
   } else {
-    toggleRow(row);
-    _lastClicked = row;
+    if (_sel[which].has(name)) {
+      _sel[which].delete(name);
+      row.classList.remove('row-selected');
+    } else {
+      _sel[which].add(name);
+      row.classList.add('row-selected');
+    }
+    _lastClicked[which] = row;
   }
-  updateSelBar();
+  updateSelBar(which);
 }
 
-function toggleRow(row) {
-  const cb = row.querySelector('.row-check');
-  cb.checked = !cb.checked;
-  row.classList.toggle('row-selected', cb.checked);
+function updateSelBar(which) {
+  if (which === 'confirmed') {
+    const bar = document.getElementById('csel-bar');
+    const aliasBtn = document.getElementById('alias-btn');
+    if (_sel.confirmed.size > 0) {
+      bar.style.display = 'flex';
+      document.getElementById('csel-count').textContent = _sel.confirmed.size + ' selected';
+      aliasBtn.style.display = _sel.confirmed.size >= 2 ? '' : 'none';
+    } else {
+      bar.style.display = 'none';
+      closeAliasPanel();
+    }
+  } else {
+    const bar = document.getElementById('ksel-bar');
+    if (_sel.candidates.size > 0) {
+      bar.style.display = 'flex';
+      document.getElementById('ksel-count').textContent = _sel.candidates.size + ' selected';
+    } else {
+      bar.style.display = 'none';
+    }
+  }
 }
 
-function toggleAll(checked) {
-  document.querySelectorAll('#users-tbody tr').forEach(row => {
-    row.querySelector('.row-check').checked = checked;
-    row.classList.toggle('row-selected', checked);
+function clearSelection(which) {
+  _sel[which].forEach(name => {
+    const prefix = which === 'confirmed' ? 'crow-' : 'krow-';
+    const r = document.getElementById(prefix + name);
+    if (r) r.classList.remove('row-selected');
   });
-  updateSelBar();
+  _sel[which].clear();
+  updateSelBar(which);
 }
 
-function getSelected() {
-  return [...document.querySelectorAll('#users-tbody tr.row-selected')].map(r => r.dataset.name);
-}
-
-function updateSelBar() {
-  const sel = getSelected();
-  const bar = document.getElementById('sel-bar');
-  const aliasBtn = document.getElementById('alias-btn');
-  if (sel.length > 0) {
-    bar.style.display = 'flex';
-    document.getElementById('sel-count').textContent = sel.length + ' selected';
-    aliasBtn.style.display = sel.length >= 2 ? '' : 'none';
-  } else {
-    bar.style.display = 'none';
-    closeAliasPanel();
-  }
-  // Sync check-all state
-  const allCbs = document.querySelectorAll('#users-tbody .row-check');
-  const checkedCbs = document.querySelectorAll('#users-tbody .row-check:checked');
-  const ca = document.getElementById('check-all');
-  if (ca) { ca.checked = allCbs.length > 0 && checkedCbs.length === allCbs.length; ca.indeterminate = checkedCbs.length > 0 && checkedCbs.length < allCbs.length; }
-}
-
-// ── Bulk delete ────────────────────────────────────────
-async function bulkDelete() {
-  const names = getSelected();
+// ── Confirmed: bulk delete ─────────────────────────────────────
+async function bulkDeleteConfirmed() {
+  const names = [..._sel.confirmed];
   if (!names.length) return;
-  if (!confirm(`Delete ${names.length} user(s)?`)) return;
+  if (!confirm(`Delete ${names.length} confirmed user(s)?`)) return;
   try {
     const r = await fetch('/api/settings/users', {
-      method: 'DELETE',
-      headers: {'Content-Type':'application/json'},
+      method: 'DELETE', headers: {'Content-Type':'application/json'},
       body: JSON.stringify({usernames: names}),
     });
     const j = await r.json();
     if (j.ok) {
-      names.forEach(n => { const row = document.getElementById('row-' + n); if (row) row.remove(); });
-      updateSelBar();
+      names.forEach(n => { const row = document.getElementById('crow-' + n); if (row) row.remove(); });
+      clearSelection('confirmed');
     } else { alert('Error: ' + (j.error || 'delete failed')); }
   } catch(e) { alert(e.message); }
 }
 
-// ── Alias ──────────────────────────────────────────────
+// ── Confirmed: alias ───────────────────────────────────────────
 function openAliasPanel() {
-  const names = getSelected();
+  const names = [..._sel.confirmed];
   if (names.length < 2) return;
   const panel = document.getElementById('alias-panel');
   const list = document.getElementById('alias-radio-list');
@@ -292,14 +354,13 @@ function closeAliasPanel() {
 
 async function confirmAlias() {
   const primary = document.querySelector('input[name="alias-primary"]:checked')?.value;
-  const names = getSelected();
+  const names = [..._sel.confirmed];
   if (!primary || names.length < 2) return;
   const msg = document.getElementById('alias-msg');
   msg.textContent = 'Saving…';
   try {
     const r = await fetch('/api/settings/users/alias', {
-      method: 'POST',
-      headers: {'Content-Type':'application/json'},
+      method: 'POST', headers: {'Content-Type':'application/json'},
       body: JSON.stringify({names, primary}),
     });
     const j = await r.json();
@@ -312,7 +373,7 @@ async function confirmAlias() {
   } catch(e) { msg.textContent = '✗ ' + e.message; }
 }
 
-// ── Add user ───────────────────────────────────────────
+// ── Confirmed: add user ────────────────────────────────────────
 async function addUser() {
   const input = document.getElementById('new-user');
   const name = input.value.trim();
@@ -327,8 +388,8 @@ async function addUser() {
     if (j.ok) {
       input.value = '';
       msg.style.color = 'var(--green)';
-      msg.textContent = '✓ Added "' + name + '". Reload the By User tab to see results.';
-      appendUserRow(name);
+      msg.textContent = '✓ Added "' + name + '".';
+      appendConfirmedRow(name);
     } else {
       msg.style.color = 'var(--danger)';
       msg.textContent = '✗ ' + (j.error || 'Add failed');
@@ -336,26 +397,57 @@ async function addUser() {
   } catch(e) { msg.style.color='var(--danger)'; msg.textContent='✗ '+e.message; }
 }
 
-function appendUserRow(name) {
-  const emptyMsg = document.getElementById('empty-msg');
-  if (emptyMsg) { location.reload(); return; }
-  const tbody = document.getElementById('users-tbody');
+function appendConfirmedRow(name) {
+  const empty = document.getElementById('confirmed-empty');
+  if (empty) { location.reload(); return; }
+  const tbody = document.getElementById('confirmed-tbody');
   if (!tbody) { location.reload(); return; }
   const tr = document.createElement('tr');
-  tr.id = 'row-' + name;
+  tr.id = 'crow-' + name;
   tr.dataset.name = name;
-  tr.style.cursor = 'pointer';
-  tr.setAttribute('onclick', 'handleRowClick(event, this)');
-  tr.innerHTML = `
-    <td style="text-align:center;vertical-align:middle;" onclick="event.stopPropagation();if(event.target.tagName!=='INPUT')toggleRow(this.parentElement);"><input type="checkbox" class="row-check" onchange="this.closest('tr').classList.toggle('row-selected',this.checked);updateSelBar()"></td>
-    <td><code style="font-size:.85rem;">${esc(name)}</code></td>
-    <td></td>
-    <td class="dimmed" style="font-size:.8rem;white-space:nowrap;">just now</td>
-  `;
+  tr.className = 'selectable-row';
+  tr.setAttribute('onclick', `rowClick(event,'confirmed',this)`);
+  tr.innerHTML = `<td><code style="font-size:.85rem;">${esc(name)}</code></td><td></td><td class="dimmed" style="font-size:.79rem;white-space:nowrap;">just now</td>`;
   tbody.appendChild(tr);
 }
 
-// ── Sync from scans ────────────────────────────────────
+// ── Candidates: promote ────────────────────────────────────────
+async function promoteSelected() {
+  const names = [..._sel.candidates];
+  if (!names.length) return;
+  try {
+    const r = await fetch('/api/settings/candidates/promote', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({usernames: names}),
+    });
+    const j = await r.json();
+    if (j.ok) {
+      document.getElementById('sync-result').innerHTML =
+        `<div class="success-banner">✓ Promoted ${names.length} user(s) to confirmed. Reloading…</div>`;
+      setTimeout(() => location.reload(), 900);
+    } else { alert('Error: ' + (j.error || 'promote failed')); }
+  } catch(e) { alert(e.message); }
+}
+
+// ── Candidates: dismiss ────────────────────────────────────────
+async function dismissSelected() {
+  const names = [..._sel.candidates];
+  if (!names.length) return;
+  if (!confirm(`Dismiss ${names.length} candidate(s)?`)) return;
+  try {
+    const r = await fetch('/api/settings/candidates', {
+      method: 'DELETE', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({usernames: names}),
+    });
+    const j = await r.json();
+    if (j.ok) {
+      names.forEach(n => { const row = document.getElementById('krow-' + n); if (row) row.remove(); });
+      clearSelection('candidates');
+    } else { alert('Error: ' + (j.error || 'dismiss failed')); }
+  } catch(e) { alert(e.message); }
+}
+
+// ── Sync from scans ────────────────────────────────────────────
 async function syncFromScans() {
   const btn = document.getElementById('sync-btn');
   const res = document.getElementById('sync-result');
@@ -366,8 +458,8 @@ async function syncFromScans() {
     const j = await r.json();
     if (j.ok) {
       const {candidates, added} = j.data;
-      res.innerHTML = `<div class="success-banner">✓ Found ${candidates} candidates — added ${added} new entries. Review the list and remove dataset names that are not real users. Then reload the By User tab.</div>`;
-      if (added > 0) setTimeout(() => location.reload(), 2000);
+      res.innerHTML = `<div class="success-banner">✓ Found ${candidates} names — added ${added} new candidate(s). Review and promote real users to confirmed.</div>`;
+      if (added > 0) setTimeout(() => location.reload(), 1800);
     } else {
       res.innerHTML = `<div class="error-banner">✗ ${j.error || 'Sync failed'}</div>`;
     }
@@ -375,7 +467,7 @@ async function syncFromScans() {
   btn.disabled = false; btn.textContent = '↻ Sync from scans';
 }
 
-// ── Settings toggle ────────────────────────────────────
+// ── Attribution toggle ─────────────────────────────────────────
 async function saveToggle(enabled) {
   const msg = document.getElementById('toggle-msg');
   msg.textContent = 'Saving…'; msg.style.color = 'var(--text-dim)';
