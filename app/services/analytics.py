@@ -186,43 +186,168 @@ def get_extension_summary(
     ]
 
 
+def _resolve_users(uid_rows) -> tuple[dict, set, dict, int, int]:
+    """
+    Resolve uid rows to usernames via stored value or pwd lookup.
+    Returns (agg, known_usernames, unresolved_uids, null_fc, null_ts).
+    agg: defaultdict {username -> {file_count, total_size_bytes, uids}}
+    unresolved_uids: {uid -> {file_count, total_size_bytes}} for uids that failed pwd lookup
+    null_fc/null_ts: totals for files with NULL uid
+    """
+    import pwd
+    import re
+    from collections import defaultdict
+
+    _SAFE_NAME = re.compile(r'^[a-zA-Z0-9_\-\.]+$')
+    agg = defaultdict(lambda: {"file_count": 0, "total_size_bytes": 0, "uids": set()})
+    known_usernames: set[str] = set()
+    unresolved: dict[int, dict] = {}
+    null_fc = null_ts = 0
+
+    for uid, stored_name, fc, ts in uid_rows:
+        fc = fc or 0
+        ts = ts or 0
+        if stored_name and _SAFE_NAME.match(stored_name):
+            name = stored_name
+            known_usernames.add(name)
+            agg[name]["file_count"] += fc
+            agg[name]["total_size_bytes"] += ts
+            if uid is not None:
+                agg[name]["uids"].add(str(uid))
+        elif uid is not None:
+            try:
+                name = pwd.getpwuid(uid).pw_name
+                if _SAFE_NAME.match(name):
+                    known_usernames.add(name)
+                    agg[name]["file_count"] += fc
+                    agg[name]["total_size_bytes"] += ts
+                    agg[name]["uids"].add(str(uid))
+                else:
+                    unresolved[uid] = {"file_count": fc, "total_size_bytes": ts}
+            except (KeyError, TypeError):
+                unresolved[uid] = {"file_count": fc, "total_size_bytes": ts}
+        else:
+            null_fc += fc
+            null_ts += ts
+
+    return agg, known_usernames, unresolved, null_fc, null_ts
+
+
+def _apply_path_attribution(conn, where_sql: str, agg: dict, known_usernames: set,
+                             unresolved: dict, null_fc: int, null_ts: int) -> None:
+    """
+    For files with unresolvable uid or NULL uid, attribute to a known username
+    if the file path contains that username as a path component.
+    Deducts from the uid:N/unknown bucket and adds to the matched username.
+    Modifies agg in-place.
+    """
+    import re
+    from collections import defaultdict
+    from sqlalchemy import text as sqlt
+
+    _SAFE_NAME = re.compile(r'^[a-zA-Z0-9_\-\.]+$')
+    has_unattr = bool(unresolved) or null_fc > 0
+
+    if not known_usernames or not has_unattr:
+        # No path matching needed — just flush remainders directly
+        for uid, totals in unresolved.items():
+            agg[f"uid:{uid}"]["file_count"] += totals["file_count"]
+            agg[f"uid:{uid}"]["total_size_bytes"] += totals["total_size_bytes"]
+            agg[f"uid:{uid}"]["uids"].add(str(uid))
+        if null_fc > 0:
+            agg["unknown"]["file_count"] += null_fc
+            agg["unknown"]["total_size_bytes"] += null_ts
+        return
+
+    # Build CASE WHEN — longer names first to avoid prefix collisions (e.g. "yang" vs "ltyang")
+    sorted_names = sorted((n for n in known_usernames if _SAFE_NAME.match(n)), key=len, reverse=True)
+    case_parts = " ".join(
+        f"WHEN path LIKE '%/{n}/%' OR path LIKE '%/{n}' THEN '{n}'"
+        for n in sorted_names
+    )
+
+    uid_filter = "uid IS NULL"
+    if unresolved:
+        uid_list = ",".join(str(u) for u in unresolved)
+        uid_filter = f"(uid IS NULL OR uid IN ({uid_list}))"
+
+    path_sql = f"""
+        SELECT uid,
+               CASE {case_parts} ELSE NULL END AS matched_user,
+               SUM(size_bytes) AS total_size_bytes,
+               COUNT(*) AS file_count
+        FROM files
+        WHERE {where_sql} AND {uid_filter}
+        GROUP BY uid, matched_user
+    """
+    rows = conn.execute(sqlt(path_sql)).fetchall()
+
+    uid_matched: dict = defaultdict(lambda: {"file_count": 0, "total_size_bytes": 0})
+    for row_uid, matched_user, ts, fc in rows:
+        if matched_user is not None:
+            agg[matched_user]["file_count"] += fc or 0
+            agg[matched_user]["total_size_bytes"] += ts or 0
+            uid_matched[row_uid]["file_count"] += fc or 0
+            uid_matched[row_uid]["total_size_bytes"] += ts or 0
+
+    # Remainder of unresolved uids that didn't match any path → uid:N
+    for uid, totals in unresolved.items():
+        m = uid_matched.get(uid, {"file_count": 0, "total_size_bytes": 0})
+        rem_fc = totals["file_count"] - m["file_count"]
+        rem_ts = totals["total_size_bytes"] - m["total_size_bytes"]
+        if rem_fc > 0 or rem_ts > 0:
+            agg[f"uid:{uid}"]["file_count"] += rem_fc
+            agg[f"uid:{uid}"]["total_size_bytes"] += rem_ts
+            agg[f"uid:{uid}"]["uids"].add(str(uid))
+
+    # Remainder of NULL uid files that didn't match any path → unknown
+    if null_fc > 0:
+        m = uid_matched.get(None, {"file_count": 0, "total_size_bytes": 0})
+        rem_fc = null_fc - m["file_count"]
+        rem_ts = null_ts - m["total_size_bytes"]
+        if rem_fc > 0:
+            agg["unknown"]["file_count"] += rem_fc
+            agg["unknown"]["total_size_bytes"] += rem_ts
+
+
 def get_user_summary(
     db: Session,
     mount_id: int,
     limit: int = 50,
     scan_id: int | None = None,
 ) -> list[dict]:
-    import pwd
+    from sqlalchemy import text as sqlt
+
     if scan_id is None:
         scan_id = _latest_scan_id_for_mount(db, mount_id)
     if scan_id is None:
         return []
-    rows = (
-        db.query(
-            File.uid,
-            func.count(File.id).label("file_count"),
-            func.sum(File.size_bytes).label("total_size_bytes"),
-        )
-        .filter(File.mount_id == mount_id, File.scan_id == scan_id, File.is_symlink == False)
-        .group_by(File.uid)
-        .order_by(text("total_size_bytes DESC"))
-        .limit(limit)
-        .all()
+
+    uid_sql = f"""
+        SELECT uid, MAX(username) AS stored_username,
+               COUNT(*) AS file_count, SUM(size_bytes) AS total_size_bytes
+        FROM files
+        WHERE mount_id = {mount_id} AND scan_id = {scan_id} AND is_symlink = 0
+        GROUP BY uid
+    """
+    with db.bind.connect() as conn:
+        uid_rows = conn.execute(sqlt(uid_sql)).fetchall()
+
+    agg, known_usernames, unresolved, null_fc, null_ts = _resolve_users(uid_rows)
+
+    where_sql = f"mount_id = {mount_id} AND scan_id = {scan_id} AND is_symlink = 0"
+    with db.bind.connect() as conn:
+        _apply_path_attribution(conn, where_sql, agg, known_usernames, unresolved, null_fc, null_ts)
+
+    result = sorted(
+        [{"uid": ",".join(sorted(v["uids"], key=lambda x: int(x) if x.isdigit() else 0)) or "—",
+          "username": n,
+          "file_count": v["file_count"],
+          "total_size_bytes": v["total_size_bytes"]}
+         for n, v in agg.items()],
+        key=lambda x: -x["total_size_bytes"],
     )
-    result = []
-    for r in rows:
-        uid = r.uid
-        try:
-            username = pwd.getpwuid(uid).pw_name if uid is not None else "unknown"
-        except (KeyError, TypeError):
-            username = f"uid:{uid}" if uid is not None else "unknown"
-        result.append({
-            "uid": uid,
-            "username": username,
-            "file_count": r.file_count,
-            "total_size_bytes": r.total_size_bytes or 0,
-        })
-    return result
+    return result[:limit]
 
 
 def get_dashboard_summary(db: Session) -> dict:

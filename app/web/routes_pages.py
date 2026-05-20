@@ -25,7 +25,18 @@ def _fmt_bytes(n: int | None) -> str:
     return f"{n:.1f} EB"
 
 
+def _fmt_duration(s: float | None) -> str:
+    if s is None:
+        return "—"
+    if s >= 3600:
+        return f"{s/3600:.1f}h"
+    if s >= 60:
+        return f"{s/60:.1f}m"
+    return f"{s:.1f}s"
+
+
 templates.env.filters["fmt_bytes"] = _fmt_bytes
+templates.env.filters["fmt_duration"] = _fmt_duration
 
 
 def _tr(request: Request, name: str, context: dict):

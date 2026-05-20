@@ -65,38 +65,24 @@ def dashboard_overview_tab(
         items = [_file_dict(f) for f in rows]
 
     elif tab == "users":
-        import pwd as _pwd
-        from collections import defaultdict
+        from app.services.analytics import _resolve_users, _apply_path_attribution
         sid_in = ",".join(str(s) for s in sids)
-        # Aggregate per-uid first, then resolve username in Python and re-merge
         uid_sql = f"""
-            SELECT uid,
-                   MAX(username) AS stored_username,
-                   COUNT(*) AS file_count,
-                   SUM(size_bytes) AS total_size_bytes
-            FROM files
-            WHERE scan_id IN ({sid_in})
+            SELECT uid, MAX(username) AS stored_username,
+                   COUNT(*) AS file_count, SUM(size_bytes) AS total_size_bytes
+            FROM files WHERE scan_id IN ({sid_in})
             GROUP BY uid
         """
         with db.bind.connect() as conn:
             uid_rows = conn.execute(sqlt(uid_sql)).fetchall()
 
-        # Resolve username: use stored value if present, else look up via pwd
-        agg = defaultdict(lambda: {"file_count": 0, "total_size_bytes": 0, "uids": set()})
-        for uid, stored_name, fc, ts in uid_rows:
-            if stored_name:
-                name = stored_name
-            elif uid is not None:
-                try:
-                    name = _pwd.getpwuid(uid).pw_name
-                except (KeyError, TypeError):
-                    name = f"uid:{uid}"
-            else:
-                name = "unknown"
-            agg[name]["file_count"] += fc or 0
-            agg[name]["total_size_bytes"] += ts or 0
-            if uid is not None:
-                agg[name]["uids"].add(str(uid))
+        agg, known_usernames, unresolved, null_fc, null_ts = _resolve_users(uid_rows)
+
+        with db.bind.connect() as conn:
+            _apply_path_attribution(
+                conn, f"scan_id IN ({sid_in})",
+                agg, known_usernames, unresolved, null_fc, null_ts,
+            )
 
         all_users = sorted(
             [{"username": n, "file_count": v["file_count"], "total_size_bytes": v["total_size_bytes"],

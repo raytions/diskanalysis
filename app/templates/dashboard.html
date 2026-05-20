@@ -31,7 +31,7 @@
   </div>
 </div>
 
-<div class="two-col" style="margin-bottom:0;">
+<div class="two-col">
   <section class="card">
     <h2>Highest Usage Mounts</h2>
     {% if summary.top_mounts %}
@@ -71,7 +71,7 @@
           <td>{{ s.scan_mode }}</td>
           <td><span class="badge badge-{{ s.status }}">{{ s.status }}</span></td>
           <td>{{ s.total_files }}</td>
-          <td>{% if s.duration_seconds %}{{ "%.1f"|format(s.duration_seconds) }}s{% else %}—{% endif %}</td>
+          <td>{{ s.duration_seconds | fmt_duration }}</td>
         </tr>
         {% endfor %}
       </tbody>
@@ -82,7 +82,8 @@
   </section>
 </div>
 
-<section class="card" id="global-overview-card" style="margin-bottom:0;padding-top:.75rem;border-top:none;border-radius:0 0 var(--radius) var(--radius);">
+<section class="card" id="global-overview-card" style="margin-bottom:0;">
+  <h2 style="margin-bottom:.5rem;">Global Overview</h2>
   <div class="tabs" style="margin-bottom:0;">
     <button class="tab-btn active" onclick="switchDashTab('files',this)">Largest Files</button>
     <button class="tab-btn" onclick="switchDashTab('dirs',this)">Largest Dirs</button>
