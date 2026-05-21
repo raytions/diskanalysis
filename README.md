@@ -2,7 +2,19 @@
 
 A self-hosted disk analysis web panel for Linux servers with many NAS mount points.
 
-**Architecture:** host-side scanner (Python CLI) + web panel (FastAPI + Jinja2, Docker).
+**Architecture:** host-side scanner (Python CLI) + web panel (FastAPI + Jinja2, SQLite).
+
+---
+
+## Features
+
+- **Mount management** — auto-discover system mounts; manually register NFS/SMB/sshfs mounts; live mount status (green/red dot); one-click mount/unmount from the detail page
+- **Scanning** — full or incremental scan; per-mount, all mounts, or arbitrary path; configurable cold-data threshold and exclude rules
+- **By File / By Directory** — largest files and directories, sortable and searchable
+- **Cold Data** — files not accessed in N days, filterable by directory prefix
+- **By Extension** — aggregate disk usage by file type
+- **By User** — per-user disk usage with NFS4 uid-squash support; cached after first computation; pre-warmed automatically after each scan
+- **Settings** — confirmed user list with aliases, candidate sync from scan data, path attribution toggle, attribution cache management
 
 ---
 
@@ -45,10 +57,8 @@ python -m app.scanner scan --mount /mnt/nas1 --exclude /mnt/nas1/.trash,*.tmp
 ### 3. Start the web panel
 
 ```bash
-# Copy env and start
 cp .env.example .env
 mkdir -p data
-
 docker compose up -d
 # Open: http://localhost:8000
 ```
@@ -61,29 +71,24 @@ docker compose up -d
 |---|---|---|
 | `APP_PORT` | `8000` | Web panel port |
 | `DB_PATH` | `/data/diskanalysis.db` | SQLite database path |
-| `DEFAULT_COLD_DAYS` | `90` | Default cold-data threshold |
-| `DEFAULT_TOP_N` | `100` | Default result count |
+| `DEFAULT_COLD_DAYS` | `90` | Default cold-data threshold (days) |
+| `DEFAULT_TOP_N` | `100` | Default result count per tab |
 | `EXCLUDE_PATHS` | `/proc,/sys,/dev,/run,/snap` | Always-excluded paths |
 | `NETWORK_FS_TYPES` | `nfs,nfs4,cifs,smb3,...` | FS types treated as network mounts |
 | `LOG_LEVEL` | `INFO` | Logging verbosity |
-| `PATH_USER_ATTRIBUTION` | `true` | Attribute files by top-level directory name first (before uid). Useful for NFS4 mounts without uid isolation — e.g. `/media/NAS02/jiahao/` always goes to `jiahao` regardless of the file's uid. Set to `false` to use uid-only attribution. |
+| `PATH_USER_ATTRIBUTION` | `true` | Attribute files by top-level directory name before uid (useful for NFS4 uid-squash). Can also be toggled in the Settings UI. |
 
 ---
 
 ## Scheduled Scanning (systemd)
 
 ```bash
-# Copy files
 sudo cp deploy/diskscan.service /etc/systemd/system/
 sudo cp deploy/diskscan.timer /etc/systemd/system/
-
 # Edit WorkingDirectory and DB_PATH in diskscan.service
 sudo systemctl daemon-reload
 sudo systemctl enable --now diskscan.timer
-
-# Check status
 sudo systemctl status diskscan.timer
-sudo journalctl -u diskscan.service -f
 ```
 
 ### Cron alternative
@@ -96,7 +101,7 @@ sudo journalctl -u diskscan.service -f
 
 ---
 
-## Reverse Proxy (Nginx example)
+## Reverse Proxy (Nginx)
 
 ```nginx
 server {
@@ -122,37 +127,37 @@ The scanner needs direct access to `/proc/mounts`, real filesystem metadata (`at
 
 ### If you must containerise the scanner
 
-Mount the host filesystem read-only:
-
 ```yaml
 volumes:
   - /:/host:ro
   - /proc:/proc:ro
 ```
 
-And set `SCAN_ROOTS=/host/mnt` in `.env`. Be aware that `shutil.disk_usage` and `/proc/mounts` paths will differ inside the container.
+Set `SCAN_ROOTS=/host/mnt` in `.env`. Note that `shutil.disk_usage` and `/proc/mounts` paths will differ inside the container.
 
 ### NAS mount scanning risks
 
-- **Stale mounts** (especially NFS): `df` or `os.stat` on a stale NFS mount can block for minutes. The scanner uses a non-blocking `shutil.disk_usage` call but errors are caught and logged — a stale mount will show as inaccessible.
-- **noatime / relatime**: Most modern Linux systems mount with `relatime` or `noatime`, meaning `atime` is not updated on every file read. **Cold file data should be treated as a best-effort indicator, not an absolute fact.** Files may appear "cold" even if they were recently read.
-- **Permission errors**: Network filesystems (CIFS/NFS) may deny access even to root depending on server configuration. Permission errors are logged per-path and do not abort the scan.
+- **Stale mounts** (NFS): `os.stat` on a stale NFS mount can block for minutes. The scanner catches and logs these errors — a stale mount will appear as inaccessible.
+- **noatime / relatime**: Most Linux systems mount with `relatime` or `noatime`. Cold file data is a best-effort indicator, not an absolute fact.
+- **Permission errors**: Network filesystems may deny access depending on server configuration. Errors are logged per-path and do not abort the scan.
 
 ### Why `--one-filesystem` matters
 
-Without xdev (cross-device) protection, scanning `/mnt` on a server with 30 NAS mounts would recursively descend into all of them. The `--one-filesystem` flag (default: on) uses `os.stat().st_dev` to detect when a directory crosses into a different filesystem and skips it. Always leave this on when scanning NAS environments.
+Without xdev protection, scanning `/mnt` on a server with 30 NAS mounts would recursively descend into all of them. `--one-filesystem` (default: on) uses `os.stat().st_dev` to detect filesystem boundaries and skips them. Always leave this on in NAS environments.
+
+### By User — NFS4 uid-squash problem
+
+NFS4 `all_squash` mounts assign a single uid to every file regardless of actual ownership. Path-based attribution (`PATH_USER_ATTRIBUTION=true`) matches top-level directory names against a curated user list, then falls back to uid for unmatched files. Each file is counted exactly once. See [docs/user-attribution.md](docs/user-attribution.md) for details.
 
 ---
 
 ## Documentation
 
-Detailed documentation is available in the [`docs/`](docs/) directory:
-
 - [Architecture](docs/architecture.md) — system design, data flow, why scanner runs on host
 - [Configuration](docs/configuration.md) — full `.env` reference
 - [Scanner CLI](docs/scanner.md) — all scanner commands and flags
 - [Deployment](docs/deployment.md) — Docker, systemd, nginx, reverse proxy
-- [User Attribution](docs/user-attribution.md) — how per-user disk usage is calculated, NFS4 uid collision fix
+- [User Attribution](docs/user-attribution.md) — per-user disk usage, NFS4 uid-squash, cache behaviour
 
 ---
 
@@ -169,23 +174,26 @@ python -m pytest tests/ -v
 ```
 diskanalysis/
 ├── app/
-│   ├── main.py              # FastAPI app
-│   ├── config.py            # Settings (pydantic-settings)
-│   ├── db.py                # SQLAlchemy engine + session
-│   ├── models.py            # ORM models
-│   ├── schemas.py           # Pydantic API schemas
-│   ├── scanner.py           # CLI entry point
+│   ├── main.py              # FastAPI app entry point + lifespan
+│   ├── config.py            # Settings (pydantic-settings, reads .env)
+│   ├── db.py                # SQLAlchemy engine, WAL mode, migrations
+│   ├── models.py            # ORM models (Mount, Scan, File, Directory, …)
+│   ├── schemas.py           # Pydantic API schemas + ok()/err() helpers
+│   ├── auth.py              # Session-based admin authentication
+│   ├── scanner.py           # CLI entry point (argparse)
 │   ├── api/
-│   │   ├── routes_mounts.py # /api/mounts/* endpoints
-│   │   └── routes_scans.py  # /api/scans/* endpoints
+│   │   ├── routes_mounts.py   # /api/mounts/* endpoints
+│   │   ├── routes_scans.py    # /api/scans/* endpoints
+│   │   └── routes_settings.py # /api/settings/* endpoints
 │   ├── services/
-│   │   ├── mounts.py        # Mount discovery
-│   │   ├── scanner.py       # Core scanner (streaming, batch-insert)
-│   │   └── analytics.py     # Query helpers (largest files, cold data)
+│   │   ├── mounts.py          # Mount discovery from /proc/mounts
+│   │   ├── scanner.py         # Core streaming scanner (batch SQLite inserts)
+│   │   └── analytics.py       # Query helpers + user attribution cache
 │   ├── web/
-│   │   └── routes_pages.py  # Jinja2 page routes
-│   ├── templates/           # HTML templates
-│   └── static/              # CSS
+│   │   └── routes_pages.py    # Jinja2 page routes
+│   ├── templates/             # HTML templates (Jinja2)
+│   └── static/                # CSS
+├── docs/                      # Detailed documentation
 ├── deploy/
 │   ├── diskscan.service
 │   └── diskscan.timer

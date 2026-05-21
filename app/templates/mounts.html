@@ -231,6 +231,7 @@
         data-usage_percent="{{ m.usage_percent }}"
         onclick="handleRowClick(event, this)">
       <td>
+        <span class="mount-dot {% if m.mount_point in mounted_paths %}dot-green{% else %}dot-red{% endif %}" style="margin-right:.35rem;vertical-align:middle;"></span>
         <strong>{{ m.mount_point }}</strong>
         {% if m.is_network_fs %}<span class="badge badge-net">NAS</span>{% endif %}
       </td>

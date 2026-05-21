@@ -527,8 +527,12 @@ def user_summary(
     db: Session = Depends(get_db),
 ):
     _assert_mount(db, mount_id)
-    data = analytics.get_user_summary(db, mount_id, limit, scan_id)
-    return ok(data)
+    try:
+        data = analytics.get_user_summary(db, mount_id, limit, scan_id)
+        return ok(data)
+    except Exception as e:
+        logger.exception("user-summary error mount %d: %s", mount_id, e)
+        return JSONResponse({"ok": False, "error": "Attribution query failed — " + str(e)[:300]}, status_code=500)
 
 
 @router.get("/mounts/{mount_id}/scans")

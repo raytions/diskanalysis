@@ -20,8 +20,8 @@ class Mount(Base):
     free_bytes: Mapped[int] = mapped_column(BigInteger, default=0)
     usage_percent: Mapped[float] = mapped_column(Float, default=0.0)
     is_accessible: Mapped[bool] = mapped_column(Boolean, default=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
-    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, onupdate=datetime.now)
     last_scanned_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
     scans: Mapped[list["Scan"]] = relationship("Scan", back_populates="mount", cascade="all, delete-orphan")
@@ -34,7 +34,7 @@ class Scan(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     mount_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("mounts.id"), nullable=True, index=True)
-    started_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    started_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     status: Mapped[str] = mapped_column(String, default="running")  # running | completed | failed
     scan_mode: Mapped[str] = mapped_column(String)  # all_mounts | single_mount | path
@@ -114,7 +114,7 @@ class CustomUser(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     username: Mapped[str] = mapped_column(String, unique=True, nullable=False)
     aliases: Mapped[str] = mapped_column(String, default="", server_default="")
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
 
 
 class ScanError(Base):
@@ -125,6 +125,6 @@ class ScanError(Base):
     path: Mapped[str | None] = mapped_column(String, nullable=True)
     error_type: Mapped[str] = mapped_column(String)
     error_message: Mapped[str] = mapped_column(Text)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
 
     scan: Mapped["Scan"] = relationship("Scan", back_populates="errors")

@@ -34,7 +34,7 @@ def _cleanup_orphaned_scans():
             scan.status = "interrupted"
             scan.total_files = actual_files
             scan.total_bytes = actual_bytes
-            scan.finished_at = datetime.utcnow()
+            scan.finished_at = datetime.now()
             logger.warning(
                 "Marked orphaned scan %d as interrupted (%d files, %.1f GB)",
                 scan.id, actual_files, actual_bytes / 1e9,

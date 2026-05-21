@@ -143,7 +143,7 @@ def run_scan(
     except OSError as e:
         scan.status = "failed"
         scan.error_summary = str(e)
-        scan.finished_at = datetime.utcnow()
+        scan.finished_at = datetime.now()
         db.commit()
         logger.error("Cannot stat root %s: %s", root_path, e)
         return
@@ -264,7 +264,7 @@ def run_scan(
         scan.error_count = error_count
         scan.status = "stopped"
         scan.error_summary = "Stopped by user"
-        scan.finished_at = datetime.utcnow()
+        scan.finished_at = datetime.now()
         scan.duration_seconds = (scan.finished_at - scan.started_at).total_seconds()
         db.commit()
         logger.info("Scan %d stopped by user after %d files", scan.id, total_files)
@@ -297,14 +297,14 @@ def run_scan(
     scan.cold_total_size_bytes = total_cold_bytes
     scan.error_count = error_count
     if mark_completed:
-        scan.finished_at = datetime.utcnow()
+        scan.finished_at = datetime.now()
         scan.duration_seconds = (scan.finished_at - scan.started_at).total_seconds()
         scan.status = "completed"
 
     if mount_id:
         mount_obj = db.get(Mount, mount_id)
         if mount_obj:
-            mount_obj.last_scanned_at = scan.finished_at or datetime.utcnow()
+            mount_obj.last_scanned_at = scan.finished_at or datetime.now()
 
     db.commit()
     logger.info(

@@ -25,6 +25,14 @@ def _fmt_bytes(n: int | None) -> str:
     return f"{n:.1f} EB"
 
 
+def _get_mounted_paths() -> set:
+    try:
+        with open("/proc/mounts") as f:
+            return {line.split()[1] for line in f if line.strip()}
+    except Exception:
+        return set()
+
+
 def _fmt_duration(s: float | None) -> str:
     if s is None:
         return "—"
@@ -84,11 +92,13 @@ def mounts_page(
         db.commit()
 
     all_fs_types = sorted({m.fs_type for m in db.query(Mount).filter(Mount.is_accessible == True).all()})
+    mounted_paths = _get_mounted_paths()
     return _tr(request, "mounts.html", {
         "mounts": mounts,
         "all_fs_types": all_fs_types,
         "fs_type": fs_type,
         "is_network": is_network,
+        "mounted_paths": mounted_paths,
     })
 
 
@@ -121,9 +131,11 @@ def mount_detail(
 def scans_page(request: Request, db: Session = Depends(get_db)):
     scans = db.query(Scan).order_by(Scan.started_at.desc()).limit(100).all()
     mounts = db.query(Mount).filter(Mount.is_accessible == True).order_by(Mount.mount_point).all()
+    mounted_paths = _get_mounted_paths()
     return _tr(request, "scans.html", {
         "scans": scans,
         "mounts": mounts,
+        "mounted_paths": mounted_paths,
         "default_cold_days": settings.DEFAULT_COLD_DAYS,
     })
 

@@ -149,7 +149,7 @@ def create_scan(req: ScanCreateRequest, request: Request, db: Session = Depends(
 
     scan = Scan(
         mount_id=req.mount_id,
-        started_at=datetime.utcnow(),
+        started_at=datetime.now(),
         status="running",
         scan_mode=req.scan_mode,
         target_path=target_path,
@@ -214,9 +214,11 @@ def _run_scan_background(scan_id: int, req: ScanCreateRequest, stop_event: threa
 
             if scan.status not in ("stopped", "failed"):
                 scan.status = "completed"
-                scan.finished_at = datetime.utcnow()
+                scan.finished_at = datetime.now()
                 scan.duration_seconds = (scan.finished_at - scan.started_at).total_seconds()
                 db.commit()
+                from app.services.analytics import prewarm_user_cache
+                prewarm_user_cache([m.id for m in mounts])
         else:
             # single_mount or path mode — use scan.target_path (set by create_scan)
             root = scan.target_path or req.target_path or "/"
@@ -231,6 +233,10 @@ def _run_scan_background(scan_id: int, req: ScanCreateRequest, stop_event: threa
                 since_timestamp=since_ts,
                 stop_event=stop_event,
             )
+            db.refresh(scan)
+            if scan.status == "completed" and scan.mount_id:
+                from app.services.analytics import prewarm_user_cache
+                prewarm_user_cache([scan.mount_id])
     except Exception as exc:
         logger.exception("Scan %d failed: %s", scan_id, exc)
         try:
@@ -238,7 +244,7 @@ def _run_scan_background(scan_id: int, req: ScanCreateRequest, stop_event: threa
             if scan:
                 scan.status = "failed"
                 scan.error_summary = str(exc)
-                scan.finished_at = datetime.utcnow()
+                scan.finished_at = datetime.now()
                 db.commit()
         except Exception:
             pass

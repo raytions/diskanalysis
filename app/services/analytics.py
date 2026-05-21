@@ -186,6 +186,81 @@ def get_extension_summary(
     ]
 
 
+def _settings_hash(conn) -> str:
+    """MD5 of current attribution settings (custom_users list + path_attr toggle).
+    Used as a cache key — changes whenever users or the toggle change."""
+    import hashlib
+    from sqlalchemy import text as sqlt
+    rows = conn.execute(sqlt(
+        "SELECT username, aliases FROM custom_users ORDER BY username"
+    )).fetchall()
+    path_attr = get_path_attribution_enabled(conn)
+    content = f"path_attr={path_attr}|" + ";".join(f"{u}:{a or ''}" for u, a in rows)
+    return hashlib.md5(content.encode()).hexdigest()[:16]
+
+
+def _cache_lookup(conn, mount_id: int, scan_id: int, settings_hash: str) -> list[dict] | None:
+    from sqlalchemy import text as sqlt
+    rows = conn.execute(sqlt(
+        "SELECT username, uids, file_count, total_size_bytes FROM user_attribution_cache "
+        "WHERE mount_id=:m AND scan_id=:s AND settings_hash=:h "
+        "ORDER BY total_size_bytes DESC"
+    ), {"m": mount_id, "s": scan_id, "h": settings_hash}).fetchall()
+    if not rows:
+        return None
+    return [{"uid": r[1] or "—", "username": r[0], "file_count": r[2], "total_size_bytes": r[3]}
+            for r in rows]
+
+
+def _cache_store(conn, mount_id: int, scan_id: int, settings_hash: str, result: list[dict]) -> None:
+    from sqlalchemy import text as sqlt
+    # Replace any previous cache for this (mount, scan) — old settings_hash rows are stale
+    conn.execute(sqlt(
+        "DELETE FROM user_attribution_cache WHERE mount_id=:m AND scan_id=:s"
+    ), {"m": mount_id, "s": scan_id})
+    for row in result:
+        conn.execute(sqlt(
+            "INSERT INTO user_attribution_cache "
+            "(mount_id, scan_id, settings_hash, username, uids, file_count, total_size_bytes) "
+            "VALUES (:m, :s, :h, :u, :ids, :fc, :ts)"
+        ), {"m": mount_id, "s": scan_id, "h": settings_hash,
+            "u": row["username"], "ids": row.get("uid", "") or "",
+            "fc": row["file_count"], "ts": row["total_size_bytes"]})
+    conn.commit()
+
+
+def invalidate_user_attribution_cache(conn, mount_id: int | None = None) -> None:
+    """Call after custom_users changes or path_attr toggle changes."""
+    from sqlalchemy import text as sqlt
+    if mount_id is not None:
+        conn.execute(sqlt("DELETE FROM user_attribution_cache WHERE mount_id=:m"), {"m": mount_id})
+    else:
+        conn.execute(sqlt("DELETE FROM user_attribution_cache"))
+    conn.commit()
+
+
+def prewarm_user_cache(mount_ids: list[int]) -> None:
+    """Launch a daemon thread to pre-warm user attribution cache for the given mounts."""
+    import threading
+    from app.db import SessionLocal
+
+    def _run():
+        db = SessionLocal()
+        try:
+            for mid in mount_ids:
+                try:
+                    get_user_summary(db, mid)
+                    logger.info("Cache pre-warmed for mount %d", mid)
+                except Exception as e:
+                    logger.warning("Cache prewarm failed for mount %d: %s", mid, e)
+        except Exception as e:
+            logger.warning("Cache prewarm thread error: %s", e)
+        finally:
+            db.close()
+
+    threading.Thread(target=_run, daemon=True, name="cache-prewarm").start()
+
+
 def get_path_attribution_enabled(conn) -> bool:
     """Read path_user_attribution toggle from app_settings table, fall back to config."""
     try:
@@ -388,20 +463,27 @@ def get_user_summary(
 
     where_sql = f"mount_id = {mount_id} AND scan_id = {scan_id}"
     with db.bind.connect() as conn:
+        shash = _settings_hash(conn)
+        cached = _cache_lookup(conn, mount_id, scan_id, shash)
+        if cached is not None:
+            return cached[:limit]
+
         path_attr = get_path_attribution_enabled(conn)
         known_usernames, uid_to_canonical, name_to_canonical = _collect_known_usernames(conn, where_sql)
         agg = _build_user_agg_per_mount(conn, [(mount_id, scan_id, mount_point)], known_usernames, uid_to_canonical,
                                         path_attribution=path_attr, name_to_canonical=name_to_canonical)
 
-    result = sorted(
-        [{"uid": ",".join(sorted(v["uids"], key=lambda x: int(x) if x.isdigit() else 0)) or "—",
-          "username": n,
-          "file_count": v["file_count"],
-          "total_size_bytes": v["total_size_bytes"]}
-         for n, v in agg.items()],
-        key=lambda x: -x["total_size_bytes"],
-    )
-    return result[:limit]
+        result = sorted(
+            [{"uid": ",".join(sorted(v["uids"], key=lambda x: int(x) if x.isdigit() else 0)) or "—",
+              "username": n,
+              "file_count": v["file_count"],
+              "total_size_bytes": v["total_size_bytes"]}
+             for n, v in agg.items()],
+            key=lambda x: -x["total_size_bytes"],
+        )
+        result = result[:limit]
+        _cache_store(conn, mount_id, scan_id, shash, result)
+    return result
 
 
 def get_dashboard_summary(db: Session) -> dict:

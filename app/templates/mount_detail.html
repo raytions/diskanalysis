@@ -209,8 +209,10 @@ async function fetchAndRender(name, el) {
 
 async function apiFetch(url) {
   const r = await fetch(url);
-  const j = await r.json();
-  if (!j.ok) throw new Error(j.error || r.status);
+  let j;
+  try { j = await r.json(); }
+  catch { throw new Error('Server error (HTTP ' + r.status + ') — check server logs'); }
+  if (!j.ok) throw new Error(j.error || ('HTTP ' + r.status));
   return j.data;
 }
 
@@ -332,6 +334,7 @@ async function renderCold(el, id, n, cd) {
 }
 
 async function renderUsers(el, id) {
+  el.innerHTML = '<div class="loading">Computing user attribution…<br><small style="color:var(--text-dim);font-size:.78rem;">First load may take a minute — results are cached for subsequent visits.</small></div>';
   const data = await apiFetch(`/api/mounts/${id}/user-summary`);
   if (!data || !data.length) { el.innerHTML = '<p class="empty">No user data. Run a scan first.</p>'; return; }
   el.innerHTML = `<div class="table-wrapper"><table class="data-table">
@@ -459,7 +462,7 @@ async function checkMountState() {
     const r = await fetch('/api/mounts/test-path?path=' + encodeURIComponent(MOUNT_POINT));
     const j = await r.json();
     const d = j.data;
-    _isMounted = d.is_mounted || d.accessible;
+    _isMounted = d.is_mounted;
   } catch(e) {
     _isMounted = true; // assume mounted if check fails
   }

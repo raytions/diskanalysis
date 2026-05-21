@@ -104,7 +104,7 @@ def cmd_scan(args) -> None:
                 print(f"  Scanning {mount.mount_point} ({mount.fs_type})…", flush=True)
                 scan = Scan(
                     mount_id=mount.id,
-                    started_at=datetime.utcnow(),
+                    started_at=datetime.now(),
                     status="running",
                     scan_mode="all_mounts",
                     target_path=mount.mount_point,
@@ -130,7 +130,7 @@ def cmd_scan(args) -> None:
             print(f"Scanning {mp}…")
             scan = Scan(
                 mount_id=mount.id,
-                started_at=datetime.utcnow(),
+                started_at=datetime.now(),
                 status="running",
                 scan_mode="single_mount",
                 target_path=mp,
@@ -149,7 +149,7 @@ def cmd_scan(args) -> None:
             print(f"Scanning path: {args.path}")
             scan = Scan(
                 mount_id=None,
-                started_at=datetime.utcnow(),
+                started_at=datetime.now(),
                 status="running",
                 scan_mode="path",
                 target_path=args.path,

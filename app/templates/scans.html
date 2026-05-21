@@ -40,8 +40,10 @@
       </label>
       <div id="mount-list" style="border:1px solid var(--border);border-radius:6px;max-height:240px;overflow-y:auto;padding:.2rem 0;">
         {% for m in mounts %}
-        <label class="mount-row" style="display:flex;align-items:center;gap:.5rem;padding:.3rem .65rem;cursor:pointer;">
-          <input type="checkbox" name="mount_ids" value="{{ m.id }}" {% if m.mount_point != '/' %}checked{% endif %} />
+        {% set is_mounted = m.mount_point in mounted_paths %}
+        <label class="mount-row{% if not is_mounted %} mount-row-unmounted{% endif %}" style="display:flex;align-items:center;gap:.5rem;padding:.3rem .65rem;cursor:{% if is_mounted %}pointer{% else %}default{% endif %};">
+          <input type="checkbox" name="mount_ids" value="{{ m.id }}" {% if m.mount_point != '/' and is_mounted %}checked{% endif %} {% if not is_mounted %}disabled{% endif %} />
+          <span class="mount-dot {% if is_mounted %}dot-green{% else %}dot-red{% endif %}"></span>
           <span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">
             <span style="font-family:monospace;font-size:.8rem;">{{ m.mount_point }}</span>
             <span style="color:var(--text-dim);font-size:.72rem;"> {{ m.fs_type }}</span>
@@ -142,6 +144,8 @@
 
 <style>
 .mount-row:hover { background: var(--bg-hover, rgba(127,127,127,.06)); }
+.mount-row-unmounted { opacity: .45; }
+.mount-row-unmounted input[type=checkbox] { cursor: not-allowed; }
 </style>
 
 <script>

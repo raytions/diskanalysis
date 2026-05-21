@@ -10,6 +10,7 @@ from typing import List
 from app.db import get_db
 from app.schemas import ok
 from app import auth
+from app.services.analytics import invalidate_user_attribution_cache as _invalidate_cache
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/settings")
@@ -37,6 +38,7 @@ def update_settings(req: SettingRequest, request: Request, db: Session = Depends
         conn.execute(text(
             "INSERT OR REPLACE INTO app_settings (key, value) VALUES ('path_user_attribution', :v)"
         ), {"v": "true" if req.path_user_attribution else "false"})
+        _invalidate_cache(conn)
         conn.commit()
     return ok({"path_user_attribution": req.path_user_attribution})
 
@@ -72,6 +74,7 @@ def add_custom_user(req: UserRequest, request: Request, db: Session = Depends(ge
             conn.execute(text(
                 "INSERT INTO custom_users (username, aliases, created_at) VALUES (:u, '', datetime('now'))"
             ), {"u": name})
+            _invalidate_cache(conn)
             conn.commit()
         return ok({"username": name})
     except Exception as e:
@@ -89,6 +92,7 @@ def bulk_delete_users(req: BulkDeleteRequest, request: Request, db: Session = De
     with db.bind.connect() as conn:
         for name in req.usernames:
             conn.execute(text("DELETE FROM custom_users WHERE username=:u"), {"u": name})
+        _invalidate_cache(conn)
         conn.commit()
     return ok({"deleted": len(req.usernames)})
 
@@ -126,6 +130,7 @@ def set_user_alias(req: AliasRequest, request: Request, db: Session = Depends(ge
         ), {"u": req.primary, "a": final_aliases_str})
         for alias in aliases:
             conn.execute(text("DELETE FROM custom_users WHERE username=:u"), {"u": alias})
+        _invalidate_cache(conn)
         conn.commit()
 
     return ok({"primary": req.primary, "aliases": all_aliases})
@@ -159,6 +164,7 @@ def promote_candidates(req: PromoteRequest, request: Request, db: Session = Depe
                 "INSERT OR IGNORE INTO custom_users (username, aliases, created_at) VALUES (:u, '', datetime('now'))"
             ), {"u": name})
             conn.execute(text("DELETE FROM user_candidates WHERE username=:u"), {"u": name})
+        _invalidate_cache(conn)
         conn.commit()
     return ok({"promoted": len(req.usernames)})
 
@@ -266,3 +272,27 @@ def sync_users_from_scans(request: Request, db: Session = Depends(get_db), _=Dep
 
     logger.info("Synced %d candidates, added %d new", len(names), added)
     return ok({"candidates": len(names), "added": added})
+
+
+# ── Attribution cache management ──────────────────────────────────────────────
+
+@router.delete("/user-cache")
+def clear_user_cache(request: Request, db: Session = Depends(get_db), _=Depends(auth.require_admin)):
+    """Clear all user attribution cache entries."""
+    with db.bind.connect() as conn:
+        _invalidate_cache(conn)
+    return ok({"cleared": True})
+
+
+@router.post("/user-cache/rebuild")
+def rebuild_user_cache(request: Request, db: Session = Depends(get_db), _=Depends(auth.require_admin)):
+    """Clear cache and rebuild in background for all accessible mounts."""
+    from app.models import Mount
+    from app.services.analytics import prewarm_user_cache
+    with db.bind.connect() as conn:
+        _invalidate_cache(conn)
+    mounts = db.query(Mount).filter(Mount.is_accessible == True).all()
+    mount_ids = [m.id for m in mounts]
+    if mount_ids:
+        prewarm_user_cache(mount_ids)
+    return ok({"rebuilding": True, "mount_count": len(mount_ids)})

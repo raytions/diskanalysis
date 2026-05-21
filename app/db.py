@@ -16,7 +16,10 @@ def _enable_wal(dbapi_conn, connection_record):
     cursor = dbapi_conn.cursor()
     cursor.execute("PRAGMA journal_mode=WAL")
     cursor.execute("PRAGMA synchronous=NORMAL")
-    cursor.execute("PRAGMA cache_size=-64000")
+    cursor.execute("PRAGMA cache_size=-131072")   # 128 MB page cache
+    cursor.execute("PRAGMA temp_store=MEMORY")    # keep temp tables / sort buffers in RAM
+    cursor.execute("PRAGMA mmap_size=536870912")    # 512 MB memory-mapped I/O
+    cursor.execute("PRAGMA wal_autocheckpoint=4000") # checkpoint every ~32 MB (4000×8KB pages)
     cursor.execute("PRAGMA busy_timeout=15000")   # wait up to 15 s on lock contention
     cursor.close()
     # Register Python-backed SQL functions
@@ -141,6 +144,16 @@ def _migrate(eng):
             conn.commit()
             logger.info("Migrated: added ix_files_scan_uid_size index")
 
+        # Covering index for user attribution Step 2: eliminates heap reads when scanning
+        # files by (mount_id, scan_id) and computing path-derived first_comp per row.
+        if "ix_files_mount_scan_path_uid" not in existing_idx:
+            conn.execute(text(
+                "CREATE INDEX IF NOT EXISTS ix_files_mount_scan_path_uid "
+                "ON files (mount_id, scan_id, path, uid, size_bytes)"
+            ))
+            conn.commit()
+            logger.info("Migrated: added ix_files_mount_scan_path_uid covering index")
+
         dir_idx = {row[1] for row in conn.execute(text("PRAGMA index_list(directories)"))}
         if "ix_dirs_scan_total_size" not in dir_idx:
             conn.execute(text("CREATE INDEX IF NOT EXISTS ix_dirs_scan_total_size ON directories (scan_id, total_size_bytes)"))
@@ -186,3 +199,27 @@ def _migrate(eng):
             )
         """))
         conn.commit()
+
+        # User attribution result cache — avoids recomputing expensive byuser query
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS user_attribution_cache (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                mount_id INTEGER NOT NULL,
+                scan_id INTEGER NOT NULL,
+                settings_hash TEXT NOT NULL,
+                username TEXT NOT NULL,
+                uids TEXT NOT NULL DEFAULT '',
+                file_count INTEGER NOT NULL DEFAULT 0,
+                total_size_bytes INTEGER NOT NULL DEFAULT 0,
+                computed_at TEXT DEFAULT (datetime('now'))
+            )
+        """))
+        conn.commit()
+        cache_idx = {row[1] for row in conn.execute(text("PRAGMA index_list(user_attribution_cache)"))}
+        if "ix_uac_lookup" not in cache_idx:
+            conn.execute(text(
+                "CREATE UNIQUE INDEX IF NOT EXISTS ix_uac_lookup "
+                "ON user_attribution_cache (mount_id, scan_id, settings_hash, username)"
+            ))
+            conn.commit()
+            logger.info("Migrated: added user_attribution_cache table")

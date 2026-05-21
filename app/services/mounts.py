@@ -143,7 +143,7 @@ def refresh_mounts(db: Session) -> list[Mount]:
     Returns the list of Mount ORM objects.
     """
     discovered = discover_mounts()
-    now = datetime.utcnow()
+    now = datetime.now()
     mounts: list[Mount] = []
 
     for info in discovered:

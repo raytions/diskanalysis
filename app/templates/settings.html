@@ -43,6 +43,23 @@
     {% endif %}
   </section>
 
+  <!-- ── Attribution Cache ──────────────────────────────────── -->
+  {% if can_admin %}
+  <section class="card">
+    <h2>Attribution Cache</h2>
+    <p style="color:var(--text-dim);font-size:.87rem;margin-bottom:1rem;line-height:1.6;">
+      User attribution results are cached after the first computation. The cache is automatically
+      rebuilt after each scan and invalidated when the user list changes. Use the buttons below
+      to manually manage it.
+    </p>
+    <div style="display:flex;gap:.5rem;align-items:center;flex-wrap:wrap;">
+      <button class="btn btn-sm" onclick="rebuildCache()">&#8635; Rebuild Now</button>
+      <button class="btn btn-danger btn-sm" onclick="clearCache()">&#128465; Clear Cache</button>
+      <span id="cache-msg" style="font-size:.82rem;color:var(--text-dim);margin-left:.25rem;"></span>
+    </div>
+  </section>
+  {% endif %}
+
   <!-- ── User panels (side by side) ──────────────────────────── -->
   <div class="user-panels">
 
@@ -488,6 +505,31 @@ async function saveToggle(enabled) {
 
 function esc(s) {
   return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+// ── Attribution cache ──────────────────────────────────────────
+async function clearCache() {
+  const msg = document.getElementById('cache-msg');
+  msg.textContent = 'Clearing…'; msg.style.color = 'var(--text-dim)';
+  try {
+    const r = await fetch('/api/settings/user-cache', {method:'DELETE'});
+    const j = await r.json();
+    if (j.ok) { msg.style.color='var(--green)'; msg.textContent='✓ Cache cleared.'; }
+    else { msg.style.color='var(--danger)'; msg.textContent='✗ '+(j.error||'failed'); }
+  } catch(e) { msg.style.color='var(--danger)'; msg.textContent='✗ '+e.message; }
+}
+
+async function rebuildCache() {
+  const msg = document.getElementById('cache-msg');
+  msg.textContent = 'Starting rebuild…'; msg.style.color = 'var(--text-dim)';
+  try {
+    const r = await fetch('/api/settings/user-cache/rebuild', {method:'POST'});
+    const j = await r.json();
+    if (j.ok) {
+      msg.style.color='var(--green)';
+      msg.textContent=`✓ Rebuilding cache for ${j.data.mount_count} mount(s) in background.`;
+    } else { msg.style.color='var(--danger)'; msg.textContent='✗ '+(j.error||'failed'); }
+  } catch(e) { msg.style.color='var(--danger)'; msg.textContent='✗ '+e.message; }
 }
 </script>
 {% endblock %}
