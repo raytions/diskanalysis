@@ -87,6 +87,14 @@ def _migrate(eng):
             conn.execute(text("ALTER TABLE scans ADD COLUMN cold_total_size_bytes INTEGER DEFAULT 0"))
             conn.commit()
             logger.info("Migrated: added scans cold stats columns")
+        if "worker_pid" not in scan_cols:
+            conn.execute(text("ALTER TABLE scans ADD COLUMN worker_pid INTEGER"))
+            conn.commit()
+            logger.info("Migrated: added scans.worker_pid column")
+        if "stop_requested" not in scan_cols:
+            conn.execute(text("ALTER TABLE scans ADD COLUMN stop_requested INTEGER NOT NULL DEFAULT 0"))
+            conn.commit()
+            logger.info("Migrated: added scans.stop_requested column")
 
         # Partial covering index for largest-files queries: (mount_id, scan_id, size_bytes DESC)
         # only on non-symlinks — allows ORDER BY size_bytes DESC LIMIT N without a full sort

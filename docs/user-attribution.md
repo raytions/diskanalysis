@@ -14,9 +14,9 @@ However, on NFS4 mounts **without uid isolation**, the NFS server assigns a sing
 
 ## Path-based attribution (default)
 
-When `PATH_USER_ATTRIBUTION=true` (the default), the system uses a two-phase strategy. **Each file is counted exactly once.**
+When `PATH_USER_ATTRIBUTION=true` (the default), the system uses a multi-phase strategy. **Each file is counted exactly once.**
 
-### Phase 1 — Top-level directory matching
+### Phase 1a — Depth-1 directory matching
 
 For each mount, the system looks at the **immediate child directories** using the `directories` table (which stores cumulative sizes including all descendants).
 
@@ -29,13 +29,23 @@ Each directory name is matched against the **Confirmed Users** list using **pref
 /media/hdd/wangzi2022/  → wangzi  (prefix: "wangzi" matches "wangzi2022")
 ```
 
-Matching is case-insensitive. Longer usernames take priority (avoids false matches when one name is a prefix of another). Only directories that match are attributed in Phase 1; their entire subtree is credited to the matched user.
+Matching is case-insensitive. Longer usernames take priority (avoids false matches when one name is a prefix of another). Only directories that match are attributed in Phase 1a; their entire subtree is credited to the matched user.
 
-This is accurate because the directory name is authoritative — whoever created `/media/NAS02/jiahao/` is jiahao, regardless of the file's uid.
+### Phase 1b — Depth-2 directory matching (intermediate directories)
+
+For depth-1 directories that **did not match** any user (e.g. an intermediate container directory like `USER_PATH`), the system looks **one level deeper** and matches their immediate children against the Confirmed Users list:
+
+```
+/media/NAS/USER_PATH/yyfang/   → yyfang  (matched at depth 2, under unmatched USER_PATH)
+/media/NAS/USER_PATH/wangzi/   → wangzi  (matched at depth 2)
+/media/NAS/jiahao/             → jiahao  (matched at depth 1 as normal)
+```
+
+This handles NAS layouts where user directories are placed inside an intermediate container directory rather than directly under the mount point.
 
 ### Phase 2 — Uid fallback for unmatched files
 
-Files that are **not** under any Phase 1–matched directory are attributed by uid. The query targets only those files (using a `NOT IN` filter on top-level directory names), so there is no double-counting.
+Files that are **not** under any Phase 1a or 1b–matched directory are attributed by uid. The query excludes matched directories (using `NOT IN` for depth-1 comps and `NOT LIKE` for depth-2 prefixes), so there is no double-counting.
 
 This handles:
 - Root-owned and system files

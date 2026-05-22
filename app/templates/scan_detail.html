@@ -10,7 +10,7 @@
   <div style="display:flex;align-items:center;gap:.75rem;">
     <span id="status-badge" class="badge badge-{{ scan.status }} badge-lg">{{ scan.status }}</span>
     {% if scan.status == "running" and (not auth_enabled or is_admin) %}
-    <button id="stop-btn" class="btn btn-danger btn-sm" onclick="stopScan()">&#9632; Stop</button>
+    <button id="stop-btn" class="btn btn-danger" onclick="stopScan()">&#9632; Stop</button>
     {% endif %}
   </div>
 </div>

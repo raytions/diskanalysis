@@ -341,19 +341,24 @@ def _collect_known_usernames(conn, where_sql: str) -> tuple[set, dict, dict]:
 
 def _build_user_agg_per_mount(conn, mount_triples: list, known_usernames: set, uid_to_name: dict, path_attribution: bool = True, name_to_canonical: dict | None = None) -> dict:
     """
-    Attribute disk usage to users using a two-step strategy per mount.
+    Attribute disk usage to users using a two-phase strategy per mount.
 
     Each file is counted exactly once:
 
-    Step 1 — Directory path attribution (if enabled):
-      Match top-level directory names against known usernames. The entire directory
-      subtree (cumulative size from *directories* table) is attributed to the matched
-      user. Unmatched directories are left for Step 2.
+    Step 1a — Depth-1 directory attribution (if enabled):
+      Match immediate child directory names of the mount point against known usernames.
+      The entire subtree (cumulative size from directories table) is credited to the
+      matched user. Unmatched depth-1 dirs are passed to Step 1b.
 
-    Step 2 — Uid attribution for files NOT under any Step-1 matched directory:
-      Query uid totals only for files whose first path component was not matched in
-      Step 1. This prevents double-counting: e.g. uid=1024 files inside jiahao/ are
-      already counted under jiahao and must not also inflate ula's total.
+    Step 1b — Depth-2 directory attribution (if enabled):
+      For depth-1 dirs that didn't match any user (e.g. an intermediate "USER_PATH"
+      directory), look one level deeper and match their immediate children against
+      known usernames. This handles mounts where user directories are not at the top
+      level, e.g. /mnt/NAS/USER_PATH/yyfang/.
+
+    Step 2 — Uid attribution for unmatched files:
+      Files not under any path-attributed directory are attributed by uid. Exclusion
+      uses NOT IN (depth-1 comps) + NOT LIKE (depth-2 matched prefixes).
 
     mount_triples: [(mount_id, scan_id, mount_point), ...]
     """
@@ -365,20 +370,30 @@ def _build_user_agg_per_mount(conn, mount_triples: list, known_usernames: set, u
     agg: dict = defaultdict(lambda: {"file_count": 0, "total_size_bytes": 0, "uids": set()})
     sorted_names = sorted((n for n in known_usernames if _SAFE.match(n)), key=len, reverse=True)
 
+    def _match_name(comp: str) -> str | None:
+        for name in sorted_names:
+            if comp.lower().startswith(name.lower()):
+                return name
+        return None
+
+    def _bucket(name: str) -> str:
+        return name_to_canonical.get(name, name) if name_to_canonical else name
+
     for mount_id, scan_id, mount_point in mount_triples:
-        off = len(mount_point.rstrip('/')) + 2
-        # SQL expression: extract the first path component below the mount point.
-        first_comp = (
+        mount_root = mount_point.rstrip('/')
+        off = len(mount_root) + 2
+        first_comp_sql = (
             f"CASE WHEN INSTR(SUBSTR(path,{off}),'/')=0 "
             f"THEN SUBSTR(path,{off}) "
             f"ELSE SUBSTR(SUBSTR(path,{off}),1,INSTR(SUBSTR(path,{off}),'/')-1) END"
         )
 
-        # ── Step 1: top-level directory path attribution ──────────────────────
-        matched_comps: set[str] = set()  # first-path-components already attributed
+        matched_depth1_comps: set[str] = set()
+        matched_depth2_prefixes: list[str] = []  # full absolute paths of depth-2 matched dirs
+
         if path_attribution:
-            # Primary: directories table (cumulative sizes, fast).
-            dir_rows = conn.execute(sqlt(f"""
+            # ── Step 1a: depth-1 directories ─────────────────────────────────
+            d1_rows = conn.execute(sqlt(f"""
                 SELECT SUBSTR(path, {off}) AS comp, total_size_bytes, file_count
                 FROM directories
                 WHERE mount_id={mount_id} AND scan_id={scan_id}
@@ -386,48 +401,83 @@ def _build_user_agg_per_mount(conn, mount_triples: list, known_usernames: set, u
                 AND INSTR(SUBSTR(path,{off}),'/') = 0
             """)).fetchall()
 
-            # Fallback when directories table is empty (e.g. interrupted scan):
-            # derive first-component totals from files table directly.
-            if not dir_rows:
-                dir_rows = conn.execute(sqlt(f"""
-                    SELECT {first_comp} AS comp,
+            if not d1_rows:
+                # Fallback when directories table is empty (e.g. interrupted scan)
+                d1_rows = conn.execute(sqlt(f"""
+                    SELECT {first_comp_sql} AS comp,
                            SUM(size_bytes) AS ts, COUNT(*) AS fc
-                    FROM files
-                    WHERE mount_id={mount_id} AND scan_id={scan_id}
+                    FROM files WHERE mount_id={mount_id} AND scan_id={scan_id}
                     GROUP BY comp
                 """)).fetchall()
 
-            for comp, ts, fc in dir_rows:
+            unmatched_d1: list[str] = []
+            for comp, ts, fc in d1_rows:
                 if not comp:
                     continue
-                ts = ts or 0
-                fc = fc or 0
-                matched_name = None
-                for name in sorted_names:
-                    if comp.lower().startswith(name.lower()):
-                        matched_name = name
-                        break
-                if matched_name:
-                    bucket = name_to_canonical.get(matched_name, matched_name) if name_to_canonical else matched_name
-                    agg[bucket]["file_count"] += fc
-                    agg[bucket]["total_size_bytes"] += ts
-                    matched_comps.add(comp)
+                matched = _match_name(comp)
+                if matched:
+                    agg[_bucket(matched)]["file_count"] += fc or 0
+                    agg[_bucket(matched)]["total_size_bytes"] += ts or 0
+                    matched_depth1_comps.add(comp)
+                else:
+                    unmatched_d1.append(comp)
 
-        # ── Step 2: uid attribution for files NOT covered by Step 1 ──────────
-        # Query uid totals restricted to files whose first path component was NOT
-        # matched in Step 1. This guarantees each file is attributed exactly once.
-        if matched_comps:
-            # Build NOT IN list (comps are SAFE-regex validated; no SQL injection risk)
-            not_in = ",".join(f"'{c}'" for c in matched_comps)
+            # ── Step 1b: depth-2 dirs under unmatched depth-1 dirs ───────────
+            # Handles layouts like /mnt/NAS/USER_PATH/yyfang/ where USER_PATH is
+            # an intermediate container directory, not a user directory.
+            for parent_comp in unmatched_d1:
+                parent_path = f"{mount_root}/{parent_comp}"
+                parent_off = len(parent_path) + 2
+
+                d2_rows = conn.execute(sqlt(f"""
+                    SELECT SUBSTR(path, {parent_off}) AS comp, total_size_bytes, file_count
+                    FROM directories
+                    WHERE mount_id={mount_id} AND scan_id={scan_id}
+                    AND path LIKE :prefix
+                    AND SUBSTR(path, {parent_off}) != ''
+                    AND INSTR(SUBSTR(path, {parent_off}), '/') = 0
+                """), {"prefix": f"{parent_path}/%"}).fetchall()
+
+                if not d2_rows:
+                    # Fallback from files table when directories table is empty
+                    second_comp_sql = (
+                        f"CASE WHEN INSTR(SUBSTR(path,{parent_off}),'/')=0 "
+                        f"THEN SUBSTR(path,{parent_off}) "
+                        f"ELSE SUBSTR(SUBSTR(path,{parent_off}),1,INSTR(SUBSTR(path,{parent_off}),'/')-1) END"
+                    )
+                    d2_rows = conn.execute(sqlt(f"""
+                        SELECT {second_comp_sql} AS comp, SUM(size_bytes), COUNT(*)
+                        FROM files WHERE mount_id={mount_id} AND scan_id={scan_id}
+                        AND path LIKE :prefix
+                        GROUP BY comp
+                    """), {"prefix": f"{parent_path}/%"}).fetchall()
+
+                for comp2, ts2, fc2 in d2_rows:
+                    if not comp2:
+                        continue
+                    matched = _match_name(comp2)
+                    if matched:
+                        agg[_bucket(matched)]["file_count"] += fc2 or 0
+                        agg[_bucket(matched)]["total_size_bytes"] += ts2 or 0
+                        matched_depth2_prefixes.append(f"{parent_path}/{comp2}")
+
+        # ── Step 2: uid attribution for files not under any matched dir ───────
+        if matched_depth1_comps or matched_depth2_prefixes:
+            extra_conds = []
+            if matched_depth1_comps:
+                not_in = ",".join(f"'{c}'" for c in matched_depth1_comps)
+                extra_conds.append(f"({first_comp_sql}) NOT IN ({not_in})")
+            for prefix in matched_depth2_prefixes:
+                safe = prefix.replace("'", "''")
+                extra_conds.append(f"path NOT LIKE '{safe}/%'")
             uid_rows = conn.execute(sqlt(f"""
                 SELECT uid, SUM(size_bytes) AS ts, COUNT(*) AS fc
                 FROM files
                 WHERE mount_id={mount_id} AND scan_id={scan_id}
-                AND ({first_comp}) NOT IN ({not_in})
+                AND {" AND ".join(extra_conds)}
                 GROUP BY uid
             """)).fetchall()
         else:
-            # No path attribution happened — attribute all files by uid.
             uid_rows = conn.execute(sqlt(f"""
                 SELECT uid, SUM(size_bytes) AS ts, COUNT(*) AS fc
                 FROM files WHERE mount_id={mount_id} AND scan_id={scan_id}

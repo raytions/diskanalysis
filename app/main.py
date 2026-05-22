@@ -18,7 +18,8 @@ logger = logging.getLogger(__name__)
 
 
 def _cleanup_orphaned_scans():
-    """Mark any scans left in 'running' state from a previous process as interrupted."""
+    """Mark 'running' scans as interrupted if their worker subprocess is no longer alive."""
+    import os
     from app.db import SessionLocal
     from app.models import Scan
     from sqlalchemy import func
@@ -29,6 +30,14 @@ def _cleanup_orphaned_scans():
         if not orphans:
             return
         for scan in orphans:
+            # Skip if the worker subprocess is still running (e.g. server hot-reload)
+            if scan.worker_pid:
+                try:
+                    os.kill(scan.worker_pid, 0)  # signal 0 = existence check
+                    logger.info("Scan %d worker pid=%d still alive — skipping cleanup", scan.id, scan.worker_pid)
+                    continue
+                except (ProcessLookupError, OSError):
+                    pass  # process gone — mark interrupted
             actual_files = db.query(func.count(File.id)).filter(File.scan_id == scan.id).scalar() or 0
             actual_bytes = db.query(func.sum(File.size_bytes)).filter(File.scan_id == scan.id).scalar() or 0
             scan.status = "interrupted"

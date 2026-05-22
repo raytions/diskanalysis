@@ -51,6 +51,8 @@ class Scan(Base):
     duration_seconds: Mapped[float | None] = mapped_column(Float, nullable=True)
     error_count: Mapped[int] = mapped_column(Integer, default=0)
     error_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    worker_pid: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    stop_requested: Mapped[bool] = mapped_column(Boolean, default=False)
 
     mount: Mapped["Mount | None"] = relationship("Mount", back_populates="scans")
     files: Mapped[list["File"]] = relationship("File", back_populates="scan", cascade="all, delete-orphan")
