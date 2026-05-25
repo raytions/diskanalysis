@@ -4,29 +4,97 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>{% block title %}DiskAnalysis{% endblock %}</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="stylesheet" href="/static/style.css" />
 </head>
 <body>
+
+<!-- ── SVG icon sprite (hidden, referenced via <use href="#i-…">) ── -->
+<svg xmlns="http://www.w3.org/2000/svg" style="display:none" aria-hidden="true">
+  <symbol id="i-user" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/>
+  </symbol>
+  <symbol id="i-settings" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+    <circle cx="12" cy="12" r="3"/>
+    <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+  </symbol>
+  <symbol id="i-contrast" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+    <circle cx="12" cy="12" r="9"/>
+    <path d="M12 3a9 9 0 0 0 0 18z" fill="currentColor" stroke="none"/>
+  </symbol>
+  <symbol id="i-refresh" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/>
+  </symbol>
+  <symbol id="i-play" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+    <polygon points="5 3 19 12 5 21 5 3"/>
+  </symbol>
+  <symbol id="i-stop" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+    <rect width="14" height="14" x="5" y="5" rx="2" ry="2"/>
+  </symbol>
+  <symbol id="i-plus" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M5 12h14"/><path d="M12 5v14"/>
+  </symbol>
+  <symbol id="i-trash" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M3 6h18"/><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"/><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"/>
+  </symbol>
+  <symbol id="i-check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M20 6 9 17l-5-5"/>
+  </symbol>
+  <symbol id="i-x" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M18 6 6 18"/><path d="M6 6l12 12"/>
+  </symbol>
+  <symbol id="i-logout" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/>
+    <polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/>
+  </symbol>
+  <symbol id="i-link" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/>
+    <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/>
+  </symbol>
+  <symbol id="i-arrow-left" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+    <path d="m12 19-7-7 7-7"/><path d="M19 12H5"/>
+  </symbol>
+  <symbol id="i-lock" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+    <rect width="18" height="11" x="3" y="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/>
+  </symbol>
+</svg>
+
 <nav class="navbar">
   <div class="nav-brand">
-    <span class="nav-icon">&#128190;</span>
     <a href="/" class="nav-title">DiskAnalysis</a>
   </div>
   <ul class="nav-links">
     <li><a href="/" {% if request.url.path == "/" %}class="active"{% endif %}>Dashboard</a></li>
     <li><a href="/mounts" {% if "/mounts" in request.url.path and "/scans" not in request.url.path and "/trigger" not in request.url.path %}class="active"{% endif %}>Mounts</a></li>
     <li><a href="/scans" {% if "/scans" in request.url.path or "/trigger" in request.url.path %}class="active"{% endif %}>Scans</a></li>
-    <li><a href="/settings" {% if "/settings" in request.url.path %}class="active"{% endif %}>Settings</a></li>
   </ul>
-  {% if not auth_enabled %}
-    <span style="color:#86efac;font-size:.8rem;margin-right:.5rem;">&#10003; Admin</span>
-  {% elif is_admin %}
-    <span style="color:#86efac;font-size:.8rem;margin-right:.5rem;">&#10003; Admin</span>
-    <a href="/logout" style="color:var(--nav-text);font-size:.8rem;padding:.25rem .5rem;border:1px solid rgba(255,255,255,.2);border-radius:4px;text-decoration:none;">Logout</a>
-  {% else %}
-    <a href="/login" style="color:var(--nav-text);font-size:.8rem;padding:.25rem .5rem;border:1px solid rgba(255,255,255,.2);border-radius:4px;text-decoration:none;">Admin Login</a>
-  {% endif %}
-  <button id="theme-toggle" onclick="toggleTheme()" title="Toggle dark mode">&#9680;</button>
+  <div class="nav-right">
+    <!-- Admin dropdown -->
+    <div class="nav-dropdown">
+      {% if not auth_enabled %}
+        <button class="nav-icon-btn admin-active" onclick="toggleNavDD('admin-menu')" title="Admin"><svg class="icon"><use href="#i-user"/></svg></button>
+        <div class="nav-dd-menu" id="admin-menu" style="display:none;">
+          <div class="nav-dd-item nav-dd-info">Admin <span style="opacity:.6;font-weight:400;">(no auth)</span></div>
+        </div>
+      {% elif is_admin %}
+        <button class="nav-icon-btn admin-active" onclick="toggleNavDD('admin-menu')" title="Admin"><svg class="icon"><use href="#i-user"/></svg></button>
+        <div class="nav-dd-menu" id="admin-menu" style="display:none;">
+          <div class="nav-dd-item nav-dd-info">Admin</div>
+          <div class="nav-dd-divider"></div>
+          <a href="/logout" class="nav-dd-item"><svg class="icon"><use href="#i-logout"/></svg> Logout</a>
+        </div>
+      {% else %}
+        <button class="nav-icon-btn" onclick="toggleNavDD('admin-menu')" title="Login"><svg class="icon"><use href="#i-user"/></svg></button>
+        <div class="nav-dd-menu" id="admin-menu" style="display:none;">
+          <a href="/login" class="nav-dd-item"><svg class="icon"><use href="#i-lock"/></svg> Admin Login</a>
+        </div>
+      {% endif %}
+    </div>
+    <!-- Settings -->
+    <a href="/settings" class="nav-icon-btn{% if '/settings' in request.url.path %} page-active{% endif %}" title="Settings"><svg class="icon"><use href="#i-settings"/></svg></a>
+    <!-- Theme toggle -->
+    <button class="nav-icon-btn" id="theme-toggle" onclick="toggleTheme()" title="Toggle dark mode"><svg class="icon"><use href="#i-contrast"/></svg></button>
+  </div>
 </nav>
 
 <main class="container">
@@ -38,6 +106,17 @@
 </footer>
 
 <script>
+function toggleNavDD(id) {
+  const menu = document.getElementById(id);
+  const open = menu.style.display !== 'none';
+  document.querySelectorAll('.nav-dd-menu').forEach(m => m.style.display = 'none');
+  if (!open) menu.style.display = 'block';
+}
+document.addEventListener('click', e => {
+  if (!e.target.closest('.nav-dropdown'))
+    document.querySelectorAll('.nav-dd-menu').forEach(m => m.style.display = 'none');
+});
+
 function toggleTheme() {
   const html = document.documentElement;
   html.dataset.theme = html.dataset.theme === 'dark' ? 'light' : 'dark';

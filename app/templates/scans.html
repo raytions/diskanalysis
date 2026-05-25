@@ -81,7 +81,7 @@
     </div>
 
     <div class="form-actions">
-      <button type="submit" class="btn btn-primary" id="submit-btn">&#9654; Start Scan</button>
+      <button type="submit" class="btn btn-primary" id="submit-btn"><svg class="icon"><use href="#i-play"/></svg> Start Scan</button>
       <span id="status-msg" style="font-size:.83rem;color:var(--text-dim);margin-left:.5rem;"></span>
     </div>
   </form>
@@ -94,7 +94,7 @@
     <h2 style="margin:0;">Scan History</h2>
     {% if can_admin %}
     <span id="hist-sel-label" style="font-size:.82rem;color:var(--text-dim);margin-left:auto;visibility:hidden;"></span>
-    <button id="hist-sel-delete" class="btn btn-danger btn-sm" disabled onclick="deleteHistSel()">Delete</button>
+    <button id="hist-sel-delete" class="btn btn-danger btn-sm" style="display:none;" onclick="deleteHistSel()">Delete</button>
     {% endif %}
   </div>
 
@@ -104,7 +104,6 @@
     <thead>
       <tr>
         <th>ID</th>
-        <th>Mode</th>
         <th>Target</th>
         <th>Status</th>
         <th style="white-space:nowrap;">Started</th>
@@ -118,12 +117,15 @@
       {% for s in scans %}
       <tr data-selectable data-id="{{ s.id }}" onclick="handleHistClick(event, this)" style="cursor:pointer;">
         <td><a href="/scans/{{ s.id }}" onclick="event.stopPropagation()">#{{ s.id }}</a></td>
-        <td>{{ s.scan_mode }}</td>
-        <td class="path-cell dimmed" title="{{ s.target_path or '' }}">{{ s.target_path or 'all' }}</td>
+        <td title="{{ s.target_path or '' }}"><div class="scan-target-cell dimmed">{{ s.target_path or 'all' }}</div></td>
         <td><span class="badge badge-{{ s.status }}">{{ s.status }}</span></td>
         <td class="dimmed" style="white-space:nowrap;">{{ s.started_at.strftime('%Y-%m-%d %H:%M') }}</td>
         {% if s.status == 'running' %}
-        <td class="num elapsed-cell" data-started="{{ s.started_at.isoformat() }}" style="white-space:nowrap;">—</td>
+          {% if s.worker_pid %}
+          <td class="num elapsed-cell" data-started="{{ s.started_at.isoformat() }}" style="white-space:nowrap;">—</td>
+          {% else %}
+          <td class="num dimmed" style="white-space:nowrap;">Queued</td>
+          {% endif %}
         {% else %}
         <td class="num" style="white-space:nowrap;">{{ s.duration_seconds | fmt_duration }}</td>
         {% endif %}
@@ -182,12 +184,12 @@ async function submitScan(e) {
 
   if (mode === 'selected_mounts') {
     const ids = [...document.querySelectorAll('#mount-list input[type=checkbox]:checked')].map(cb => parseInt(cb.value));
-    if (!ids.length) { showScanErr('Select at least one mount'); btn.disabled = false; btn.textContent = '▶ Start Scan'; return; }
+    if (!ids.length) { showScanErr('Select at least one mount'); btn.disabled = false; btn.innerHTML = '<svg class="icon"><use href="#i-play"/></svg> Start Scan'; return; }
     data.mount_ids = ids;
   }
   if (mode === 'path') {
     const p = form.target_path.value.trim();
-    if (!p) { showScanErr('Enter a target path'); btn.disabled = false; btn.textContent = '▶ Start Scan'; return; }
+    if (!p) { showScanErr('Enter a target path'); btn.disabled = false; btn.innerHTML = '<svg class="icon"><use href="#i-play"/></svg> Start Scan'; return; }
     data.target_path = p;
   }
 
@@ -195,14 +197,19 @@ async function submitScan(e) {
     const r = await fetch('/api/scans', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(data)});
     const j = await r.json();
     if (j.ok) {
-      window.location.href = '/scans/' + j.data.id;
+      if (j.data.multi) {
+        // Parallel multi-mount scan: redirect to list page
+        window.location.href = '/scans';
+      } else {
+        window.location.href = '/scans/' + j.data.id;
+      }
     } else {
       showScanErr('Error: ' + (j.error || r.status));
-      btn.disabled = false; btn.textContent = '▶ Start Scan';
+      btn.disabled = false; btn.innerHTML = '<svg class="icon"><use href="#i-play"/></svg> Start Scan';
     }
   } catch(err) {
     showScanErr('Request failed: ' + err.message);
-    btn.disabled = false; btn.textContent = '▶ Start Scan';
+    btn.disabled = false; btn.innerHTML = '<svg class="icon"><use href="#i-play"/></svg> Start Scan';
   }
 }
 
@@ -239,10 +246,10 @@ function updateHistUI() {
   if (!label) return;
   if (histSel.size > 0) {
     label.style.visibility = ''; label.textContent = histSel.size + ' selected';
-    btn.disabled = false;
+    btn.style.display = '';
   } else {
     label.style.visibility = 'hidden'; label.textContent = '';
-    btn.disabled = true;
+    btn.style.display = 'none';
   }
 }
 
@@ -273,25 +280,94 @@ function showToast(msg) {
   setTimeout(() => { t.style.opacity = '0'; setTimeout(() => t.remove(), 400); }, 3600);
 }
 
-// Auto-refresh page if any scan is still running
-{% set has_running = scans | selectattr("status", "equalto", "running") | list %}
-{% if has_running %}
-setTimeout(() => location.reload(), 5000);
-
+// ── Live update for running scans (no full-page reload) ─────────────────────
 function fmtDur(s) {
   if (s >= 3600) return (s / 3600).toFixed(1) + 'h';
   if (s >= 60)   return (s / 60).toFixed(1) + 'm';
   return s.toFixed(1) + 's';
 }
+function fmtBJS(n) {
+  if (!n) return '0 B';
+  const u = ['B','KB','MB','GB','TB','PB']; let i = 0;
+  while (n >= 1024 && i < u.length - 1) { n /= 1024; i++; }
+  return n.toFixed(1) + ' ' + u[i];
+}
 function tickElapsed() {
   const now = Date.now();
-  document.querySelectorAll('.elapsed-cell').forEach(td => {
-    const started = new Date(td.dataset.started).getTime();
-    td.textContent = fmtDur((now - started) / 1000);
+  document.querySelectorAll('.elapsed-cell[data-started]').forEach(td => {
+    const ms = new Date(td.dataset.started).getTime();
+    if (ms) td.textContent = fmtDur((now - ms) / 1000);
   });
 }
-tickElapsed();
 setInterval(tickElapsed, 1000);
-{% endif %}
+tickElapsed();
+
+// Collect running scan IDs from the rendered table
+const _runningIds = new Set(
+  [...document.querySelectorAll('#scans-tbody tr[data-id]')]
+    .filter(r => r.querySelector('.badge-running'))
+    .map(r => parseInt(r.dataset.id))
+);
+
+function _applyRow(scan) {
+  const row = document.querySelector(`#scans-tbody tr[data-id="${scan.id}"]`);
+  if (!row) return;
+  const cells = row.querySelectorAll('td');
+  // cols: [0]=id [1]=target [2]=status [3]=started [4]=duration [5]=files [6]=size [7]=errors
+  const targetEl = cells[1].querySelector('.scan-target-cell') || cells[1];
+  targetEl.textContent = scan.target_path || 'all';
+  cells[2].innerHTML = `<span class="badge badge-${scan.status}">${scan.status}</span>`;
+  if (scan.started_at) {
+    const d = new Date(scan.started_at);
+    cells[3].textContent = d.toISOString().slice(0, 16).replace('T', ' ');
+  }
+  const dur = cells[4];
+  if (scan.status === 'running') {
+    if (scan.worker_pid) {
+      dur.className = 'num elapsed-cell';
+      dur.dataset.started = scan.started_at;
+      tickElapsed();
+    } else {
+      dur.className = 'num dimmed';
+      dur.textContent = 'Queued';
+      delete dur.dataset.started;
+    }
+  } else {
+    dur.className = 'num';
+    dur.textContent = scan.duration_seconds != null ? fmtDur(scan.duration_seconds) : '—';
+    delete dur.dataset.started;
+  }
+  cells[5].textContent = (scan.total_files || 0).toLocaleString();
+  cells[6].textContent = fmtBJS(scan.total_bytes || 0);
+  const errs = scan.error_count || 0;
+  cells[7].textContent = errs;
+  cells[7].className = 'num' + (errs > 0 ? ' warn-text' : '');
+}
+
+async function _pollRunning() {
+  if (_runningIds.size === 0) return;
+  try {
+    const r = await fetch('/api/scans?status=running&limit=200');
+    const j = await r.json();
+    if (!j.ok) return;
+    const nowRunning = new Set(j.data.items.map(s => s.id));
+    // Update still-running scans
+    for (const scan of j.data.items) {
+      if (_runningIds.has(scan.id)) _applyRow(scan);
+    }
+    // Scans that just finished — fetch their final state
+    for (const id of [..._runningIds].filter(id => !nowRunning.has(id))) {
+      try {
+        const r2 = await fetch(`/api/scans/${id}`);
+        const j2 = await r2.json();
+        if (j2.ok) _applyRow(j2.data);
+      } catch(e) {}
+      _runningIds.delete(id);
+    }
+  } catch(e) { /* ignore transient network errors */ }
+  if (_runningIds.size > 0) setTimeout(_pollRunning, 3000);
+}
+
+if (_runningIds.size > 0) setTimeout(_pollRunning, 3000);
 </script>
 {% endblock %}

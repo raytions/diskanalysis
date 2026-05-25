@@ -4,20 +4,20 @@
 {% block content %}
 <div class="page-header">
   <div>
-    <a href="/scans" class="back-link">&#8592; Scans</a>
+    <a href="/scans" class="back-link"><svg class="icon"><use href="#i-arrow-left"/></svg> Scans</a>
     <h1>Scan #{{ scan.id }}</h1>
   </div>
   <div style="display:flex;align-items:center;gap:.75rem;">
     <span id="status-badge" class="badge badge-{{ scan.status }} badge-lg">{{ scan.status }}</span>
     {% if scan.status == "running" and (not auth_enabled or is_admin) %}
-    <button id="stop-btn" class="btn btn-danger" onclick="stopScan()">&#9632; Stop</button>
+    <button id="stop-btn" class="btn btn-danger" onclick="stopScan()"><svg class="icon"><use href="#i-stop"/></svg> Stop</button>
     {% endif %}
   </div>
 </div>
 
 {% if scan.status == "running" %}
 <div class="info-banner" id="progress-banner">
-  &#9654; 扫描进行中…
+  <svg class="icon" style="animation:spin 1.2s linear infinite;"><use href="#i-refresh"/></svg> 扫描进行中…
   <span id="progress-files" style="margin-left:1rem;font-weight:600;"></span>
   <span id="current-mount" style="margin-left:1rem;font-family:monospace;font-size:.85rem;opacity:.7;"></span>
 </div>

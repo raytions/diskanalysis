@@ -18,36 +18,27 @@ logger = logging.getLogger(__name__)
 
 
 def _cleanup_orphaned_scans():
-    """Mark 'running' scans as interrupted if their worker subprocess is no longer alive."""
+    """Mark 'running' scans as interrupted if their worker subprocess is no longer alive.
+    Skips COUNT/SUM queries — with a large DB+WAL these are extremely slow at startup."""
     import os
     from app.db import SessionLocal
     from app.models import Scan
-    from sqlalchemy import func
-    from app.models import File
     db = SessionLocal()
     try:
         orphans = db.query(Scan).filter(Scan.status == "running").all()
         if not orphans:
             return
         for scan in orphans:
-            # Skip if the worker subprocess is still running (e.g. server hot-reload)
             if scan.worker_pid:
                 try:
-                    os.kill(scan.worker_pid, 0)  # signal 0 = existence check
+                    os.kill(scan.worker_pid, 0)
                     logger.info("Scan %d worker pid=%d still alive — skipping cleanup", scan.id, scan.worker_pid)
                     continue
                 except (ProcessLookupError, OSError):
-                    pass  # process gone — mark interrupted
-            actual_files = db.query(func.count(File.id)).filter(File.scan_id == scan.id).scalar() or 0
-            actual_bytes = db.query(func.sum(File.size_bytes)).filter(File.scan_id == scan.id).scalar() or 0
+                    pass
             scan.status = "interrupted"
-            scan.total_files = actual_files
-            scan.total_bytes = actual_bytes
             scan.finished_at = datetime.now()
-            logger.warning(
-                "Marked orphaned scan %d as interrupted (%d files, %.1f GB)",
-                scan.id, actual_files, actual_bytes / 1e9,
-            )
+            logger.warning("Marked orphaned scan %d as interrupted", scan.id)
         db.commit()
     finally:
         db.close()

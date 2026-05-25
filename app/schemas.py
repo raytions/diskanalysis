@@ -17,6 +17,7 @@ class MountSchema(BaseModel):
     created_at: datetime
     updated_at: datetime
     last_scanned_at: datetime | None
+    label: str = ""
 
     model_config = {"from_attributes": True}
 
@@ -39,6 +40,7 @@ class ScanSchema(BaseModel):
     duration_seconds: float | None
     error_count: int
     error_summary: str | None
+    worker_pid: int | None = None
 
     model_config = {"from_attributes": True}
 

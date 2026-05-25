@@ -3,205 +3,329 @@
 
 {% block content %}
 {% set can_admin = (not auth_enabled) or is_admin %}
-<div class="page-header">
-  <h1>Settings</h1>
-</div>
 
-<div style="display:flex;flex-direction:column;gap:1.25rem;">
+<div class="settings-layout">
 
-  <!-- ── User Attribution ─────────────────────────────────────── -->
-  <section class="card">
-    <h2>User Attribution</h2>
-    <p style="color:var(--text-dim);font-size:.87rem;margin-bottom:1rem;line-height:1.6;">
-      When enabled, files are attributed to users by matching the top-level directory name
-      against the confirmed user list — before falling back to uid. Handles NFS4 mounts
-      where all files share the same system uid regardless of actual owner.
-    </p>
+  <!-- ── Sidebar ─────────────────────────────────────────── -->
+  <nav class="settings-nav">
+    <div class="settings-nav-group-label">General</div>
+    <button class="settings-nav-item" data-section="attribution" onclick="showSection('attribution')">Attribution</button>
+    <button class="settings-nav-item" data-section="scan" onclick="showSection('scan')">Scan</button>
     {% if can_admin %}
-    <div class="setting-row">
-      <div>
-        <div class="setting-label">Path-based attribution</div>
-        <div class="setting-hint">Match top-level directory names against confirmed users</div>
+    <button class="settings-nav-item" data-section="cache" onclick="showSection('cache')">Cache</button>
+    {% endif %}
+    <div class="settings-nav-sep"></div>
+    <div class="settings-nav-group-label">Users</div>
+    <button class="settings-nav-item" data-section="users" onclick="showSection('users')">Users</button>
+  </nav>
+
+  <!-- ── Content ─────────────────────────────────────────── -->
+  <div class="settings-content">
+
+    <!-- Attribution -->
+    <div class="settings-section" id="attribution">
+      <div class="card">
+        <div class="settings-sec-head">
+          <h2>User Attribution</h2>
+        </div>
+        <p class="settings-desc">
+          When enabled, files are attributed to users by matching the top-level directory name
+          against the confirmed user list — before falling back to uid. Handles NFS4 mounts
+          where all files share the same system uid regardless of actual owner.
+        </p>
+        {% if can_admin %}
+        <div class="setting-row">
+          <div>
+            <div class="setting-label">Path-based attribution</div>
+            <div class="setting-hint">Match top-level directory names against confirmed users</div>
+          </div>
+          <label class="toggle-switch">
+            <input type="checkbox" id="path-attr-toggle" {% if path_user_attribution %}checked{% endif %}
+                   onchange="saveToggle(this.checked)">
+            <span class="toggle-slider"></span>
+          </label>
+        </div>
+        <div id="toggle-msg" class="setting-msg"></div>
+        {% else %}
+        <div class="setting-row">
+          <div>
+            <div class="setting-label">Path-based attribution</div>
+            <div class="setting-hint">{% if path_user_attribution %}Enabled{% else %}Disabled{% endif %} — log in as admin to change</div>
+          </div>
+          <span class="badge {% if path_user_attribution %}badge-completed{% else %}badge-stopped{% endif %}">
+            {% if path_user_attribution %}On{% else %}Off{% endif %}
+          </span>
+        </div>
+        {% endif %}
       </div>
-      <label class="toggle-switch">
-        <input type="checkbox" id="path-attr-toggle" {% if path_user_attribution %}checked{% endif %}
-               onchange="saveToggle(this.checked)">
-        <span class="toggle-slider"></span>
-      </label>
     </div>
-    <div id="toggle-msg" style="font-size:.82rem;margin-top:.4rem;min-height:1.2em;color:var(--text-dim);"></div>
-    {% else %}
-    <div class="setting-row">
-      <div>
-        <div class="setting-label">Path-based attribution</div>
-        <div class="setting-hint">{% if path_user_attribution %}Enabled{% else %}Disabled{% endif %} — log in as admin to change</div>
+
+    <!-- Scan Settings -->
+    <div class="settings-section" id="scan">
+      <div class="card">
+        <div class="settings-sec-head">
+          <h2>Scan Settings</h2>
+        </div>
+        {% if can_admin %}
+        <div class="setting-row">
+          <div>
+            <div class="setting-label">Parallel Scan Workers</div>
+            <div class="setting-hint">Max mounts scanned concurrently in All Mounts or Select Mounts mode (1–32)</div>
+          </div>
+          <div class="setting-ctrl">
+            <input type="number" id="parallel-input" class="settings-input"
+                   value="{{ max_parallel_scans }}" min="1" max="32"
+                   style="width:68px;text-align:center;font-variant-numeric:tabular-nums;">
+            <button class="btn btn-primary btn-sm" onclick="saveParallel()">Save</button>
+            <span id="parallel-msg" class="setting-msg-inline"></span>
+          </div>
+        </div>
+        {% else %}
+        <div class="setting-row">
+          <div>
+            <div class="setting-label">Parallel Scan Workers</div>
+            <div class="setting-hint">Max concurrent mount scans — log in as admin to change</div>
+          </div>
+          <span class="badge">{{ max_parallel_scans }}</span>
+        </div>
+        {% endif %}
       </div>
-      <span class="badge {% if path_user_attribution %}badge-completed{% else %}badge-stopped{% endif %}">
-        {% if path_user_attribution %}On{% else %}Off{% endif %}
-      </span>
+    </div>
+
+    <!-- Attribution Cache (admin only) -->
+    {% if can_admin %}
+    <div class="settings-section" id="cache">
+      <div class="card">
+        <div class="settings-sec-head">
+          <h2>Attribution Cache</h2>
+        </div>
+        <p class="settings-desc">
+          User attribution results are cached after the first computation. The cache is automatically
+          rebuilt after each scan and invalidated when the user list changes.
+        </p>
+        <div class="setting-row">
+          <div>
+            <div class="setting-label">Cache management</div>
+            <div class="setting-hint">Rebuild re-computes all mounts in background; Clear removes cached results immediately</div>
+          </div>
+          <div class="setting-ctrl">
+            <button class="btn btn-sm" onclick="rebuildCache()"><svg class="icon"><use href="#i-refresh"/></svg> Rebuild</button>
+            <button class="btn btn-danger btn-sm" onclick="clearCache()">Clear</button>
+            <span id="cache-msg" class="setting-msg-inline"></span>
+          </div>
+        </div>
+      </div>
     </div>
     {% endif %}
-  </section>
 
-  <!-- ── Attribution Cache ──────────────────────────────────── -->
-  {% if can_admin %}
-  <section class="card">
-    <h2>Attribution Cache</h2>
-    <p style="color:var(--text-dim);font-size:.87rem;margin-bottom:1rem;line-height:1.6;">
-      User attribution results are cached after the first computation. The cache is automatically
-      rebuilt after each scan and invalidated when the user list changes. Use the buttons below
-      to manually manage it.
-    </p>
-    <div style="display:flex;gap:.5rem;align-items:center;flex-wrap:wrap;">
-      <button class="btn btn-sm" onclick="rebuildCache()">&#8635; Rebuild Now</button>
-      <button class="btn btn-danger btn-sm" onclick="clearCache()">&#128465; Clear Cache</button>
-      <span id="cache-msg" style="font-size:.82rem;color:var(--text-dim);margin-left:.25rem;"></span>
-    </div>
-  </section>
-  {% endif %}
+    <!-- Users (Confirmed + Candidates) -->
+    <div class="settings-section" id="users">
 
-  <!-- ── User panels (side by side) ──────────────────────────── -->
-  <div class="user-panels">
-
-    <!-- ── Confirmed Users ──────────────────────────────────── -->
-    <section class="card" id="confirmed-panel">
-      <h2 style="margin-bottom:.35rem;">Confirmed Users</h2>
-      <p style="color:var(--text-dim);font-size:.84rem;margin-bottom:.9rem;line-height:1.5;">
-        Authoritative list used for path-based attribution. Add usernames here manually or
-        promote from candidates. Use aliases to merge variant names under one primary.
-      </p>
-
-      {% if can_admin %}
-      <div style="display:flex;gap:.5rem;margin-bottom:.6rem;">
-        <input type="text" id="new-user" placeholder="username" class="settings-input"
-               onkeydown="if(event.key==='Enter')addUser()" />
-        <button class="btn btn-primary btn-sm" onclick="addUser()">+ Add</button>
-      </div>
-      <div id="add-msg" style="font-size:.82rem;margin-bottom:.4rem;min-height:1.1em;"></div>
-
-      <!-- Confirmed selection bar -->
-      <div id="csel-bar" class="sel-bar" style="display:none;">
-        <span id="csel-count" style="font-weight:600;"></span>
-        <span style="flex:1;"></span>
-        <button class="btn btn-sm" id="alias-btn" onclick="openAliasPanel()" style="display:none;">&#10697; Alias</button>
-        <button class="btn btn-danger btn-sm" onclick="bulkDeleteConfirmed()">&#128465; Delete</button>
-      </div>
-
-      <!-- Alias panel -->
-      <div id="alias-panel" class="alias-panel" style="display:none;">
-        <div style="font-size:.87rem;font-weight:600;margin-bottom:.5rem;">Select primary username:</div>
-        <div id="alias-radio-list" style="display:flex;flex-direction:column;gap:.35rem;margin-bottom:.75rem;"></div>
-        <div style="display:flex;gap:.5rem;">
-          <button class="btn btn-primary btn-sm" onclick="confirmAlias()">Confirm Alias</button>
-          <button class="btn btn-sm" onclick="closeAliasPanel()">Cancel</button>
+      <!-- Confirmed Users -->
+      <div class="card" id="confirmed-panel" style="margin-bottom:1.25rem;">
+        <div class="settings-sec-head">
+          <h2>Confirmed Users</h2>
+          {% if can_admin %}
+          <div style="display:flex;gap:.45rem;align-items:center;">
+            <input type="text" id="new-user" placeholder="username" class="settings-input"
+                   style="width:160px;" onkeydown="if(event.key==='Enter')addUser()" />
+            <button class="btn btn-primary btn-sm" onclick="addUser()">+ Add</button>
+          </div>
+          {% endif %}
         </div>
-        <div id="alias-msg" style="font-size:.82rem;margin-top:.4rem;min-height:1em;"></div>
-      </div>
-      {% endif %}
+        <p class="settings-desc">
+          Authoritative list used for path-based attribution. Add usernames here manually or
+          promote from candidates. Use aliases to merge variant names under one primary.
+        </p>
 
-      <div class="table-wrapper" id="confirmed-wrap">
-        {% if users %}
-        <table class="data-table sel-table" id="confirmed-table">
-          <thead>
-            <tr>
-              <th>Username</th>
-              <th>Aliases</th>
-              <th style="white-space:nowrap;">Added</th>
-            </tr>
-          </thead>
-          <tbody id="confirmed-tbody">
-            {% for u in users %}
-            <tr id="crow-{{ u.username }}" data-name="{{ u.username }}"
-                {% if can_admin %}onclick="rowClick(event,'confirmed',this)"{% endif %}
-                {% if can_admin %}class="selectable-row"{% endif %}>
-              <td><code style="font-size:.85rem;">{{ u.username }}</code></td>
-              <td>
-                {% for alias in u.aliases %}
-                <span class="alias-tag">{{ alias }}</span>
-                {% endfor %}
-              </td>
-              <td class="dimmed" style="font-size:.79rem;white-space:nowrap;">{{ u.created_at or '—' }}</td>
-            </tr>
-            {% endfor %}
-          </tbody>
-        </table>
-        {% else %}
-        <p class="empty" id="confirmed-empty">No confirmed users yet. Add manually or promote from candidates.</p>
-        {% endif %}
-      </div>
-    </section>
-
-    <!-- ── Candidates ─────────────────────────────────────────── -->
-    <section class="card" id="candidates-panel">
-      <div style="display:flex;align-items:center;gap:.75rem;flex-wrap:wrap;margin-bottom:.35rem;">
-        <h2 style="margin:0;">Candidates</h2>
         {% if can_admin %}
-        <button class="btn btn-sm" onclick="syncFromScans()" id="sync-btn">&#8635; Sync from scans</button>
+        <div id="add-msg" class="setting-msg" style="margin-bottom:.4rem;"></div>
+
+        <div id="csel-bar" class="sel-bar" style="display:none;">
+          <span id="csel-count" style="font-weight:600;"></span>
+          <span style="flex:1;"></span>
+          <button class="btn btn-sm" id="alias-btn" onclick="openAliasPanel()" style="display:none;"><svg class="icon"><use href="#i-link"/></svg> Alias</button>
+          <button class="btn btn-danger btn-sm" onclick="bulkDeleteConfirmed()">Delete</button>
+        </div>
+
+        <div id="alias-panel" class="alias-panel" style="display:none;">
+          <div style="font-size:.87rem;font-weight:600;margin-bottom:.5rem;">Select primary username:</div>
+          <div id="alias-radio-list" style="display:flex;flex-direction:column;gap:.35rem;margin-bottom:.75rem;"></div>
+          <div style="display:flex;gap:.5rem;">
+            <button class="btn btn-primary btn-sm" onclick="confirmAlias()">Confirm Alias</button>
+            <button class="btn btn-sm" onclick="closeAliasPanel()">Cancel</button>
+          </div>
+          <div id="alias-msg" class="setting-msg"></div>
+        </div>
         {% endif %}
+
+        <div class="table-wrapper users-table-wrap" id="confirmed-wrap">
+          {% if users %}
+          <table class="data-table sel-table" id="confirmed-table">
+            <thead>
+              <tr>
+                <th>Username</th>
+                <th>Aliases</th>
+                <th style="white-space:nowrap;">Added</th>
+              </tr>
+            </thead>
+            <tbody id="confirmed-tbody">
+              {% for u in users %}
+              <tr id="crow-{{ u.username }}" data-name="{{ u.username }}"
+                  {% if can_admin %}onclick="rowClick(event,'confirmed',this)"{% endif %}
+                  {% if can_admin %}class="selectable-row"{% endif %}>
+                <td><code style="font-size:.85rem;">{{ u.username }}</code></td>
+                <td>
+                  {% for alias in u.aliases %}
+                  <span class="alias-tag">{{ alias }}</span>
+                  {% endfor %}
+                </td>
+                <td class="dimmed" style="font-size:.79rem;white-space:nowrap;">{{ u.created_at or '—' }}</td>
+              </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+          {% else %}
+          <p class="empty" id="confirmed-empty">No confirmed users yet. Add manually or promote from candidates.</p>
+          {% endif %}
+        </div>
       </div>
-      <p style="color:var(--text-dim);font-size:.84rem;margin-bottom:.9rem;line-height:1.5;">
-        Names discovered from scan directories and <code>/etc/passwd</code>. Review and promote
-        real users to the confirmed list. Syncing refreshes this list without touching confirmed users.
-      </p>
 
-      {% if can_admin %}
-      <!-- Candidates selection bar -->
-      <div id="ksel-bar" class="sel-bar sel-bar-candidates" style="display:none;">
-        <span id="ksel-count" style="font-weight:600;"></span>
-        <span style="flex:1;"></span>
-        <button class="btn btn-sm" onclick="promoteSelected()">&#10003; Add to Confirmed</button>
-        <button class="btn btn-danger btn-sm" onclick="dismissSelected()">&#10005; Dismiss</button>
-      </div>
-      {% endif %}
+      <!-- Candidates -->
+      <div class="card" id="candidates-panel">
+        <div class="settings-sec-head">
+          <h2>Candidates</h2>
+          {% if can_admin %}
+          <button class="btn btn-sm" onclick="syncFromScans()" id="sync-btn"><svg class="icon"><use href="#i-refresh"/></svg> Sync from scans</button>
+          {% endif %}
+        </div>
+        <p class="settings-desc">
+          Names discovered from scan directories and <code>/etc/passwd</code>. Review and promote
+          real users to the confirmed list. Syncing refreshes this list without touching confirmed users.
+        </p>
 
-      <div id="sync-result" style="margin-bottom:.5rem;"></div>
-
-      <div class="table-wrapper" id="candidates-wrap">
-        {% if candidates %}
-        <table class="data-table sel-table" id="candidates-table">
-          <thead>
-            <tr>
-              <th>Username</th>
-              <th style="white-space:nowrap;">Discovered</th>
-            </tr>
-          </thead>
-          <tbody id="candidates-tbody">
-            {% for c in candidates %}
-            <tr id="krow-{{ c.username }}" data-name="{{ c.username }}"
-                {% if can_admin %}onclick="rowClick(event,'candidates',this)"{% endif %}
-                {% if can_admin %}class="selectable-row"{% endif %}>
-              <td><code style="font-size:.85rem;">{{ c.username }}</code></td>
-              <td class="dimmed" style="font-size:.79rem;white-space:nowrap;">{{ c.created_at or '—' }}</td>
-            </tr>
-            {% endfor %}
-          </tbody>
-        </table>
-        {% else %}
-        <p class="empty" id="candidates-empty">No candidates yet. Click "Sync from scans" to discover usernames.</p>
+        {% if can_admin %}
+        <div id="ksel-bar" class="sel-bar sel-bar-candidates" style="display:none;">
+          <span id="ksel-count" style="font-weight:600;"></span>
+          <span style="flex:1;"></span>
+          <button class="btn btn-sm" onclick="promoteSelected()"><svg class="icon"><use href="#i-check"/></svg> Add to Confirmed</button>
+          <button class="btn btn-danger btn-sm" onclick="dismissSelected()"><svg class="icon"><use href="#i-x"/></svg> Dismiss</button>
+        </div>
         {% endif %}
+
+        <div id="sync-result" style="margin-bottom:.5rem;"></div>
+
+        <div class="table-wrapper users-table-wrap" id="candidates-wrap">
+          {% if candidates %}
+          <table class="data-table sel-table" id="candidates-table">
+            <thead>
+              <tr>
+                <th>Username</th>
+                <th style="white-space:nowrap;">Discovered</th>
+              </tr>
+            </thead>
+            <tbody id="candidates-tbody">
+              {% for c in candidates %}
+              <tr id="krow-{{ c.username }}" data-name="{{ c.username }}"
+                  {% if can_admin %}onclick="rowClick(event,'candidates',this)"{% endif %}
+                  {% if can_admin %}class="selectable-row"{% endif %}>
+                <td><code style="font-size:.85rem;">{{ c.username }}</code></td>
+                <td class="dimmed" style="font-size:.79rem;white-space:nowrap;">{{ c.created_at or '—' }}</td>
+              </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+          {% else %}
+          <p class="empty" id="candidates-empty">No candidates yet. Click "Sync from scans" to discover usernames.</p>
+          {% endif %}
+        </div>
       </div>
-    </section>
 
-  </div><!-- /.user-panels -->
+    </div>
 
-</div>
+  </div><!-- /.settings-content -->
+</div><!-- /.settings-layout -->
 
 <style>
-/* ── Settings toggle ── */
-.setting-row { display:flex;align-items:center;justify-content:space-between;gap:1rem;padding:.75rem 0;border-top:1px solid var(--border); }
-.setting-label { font-size:.9rem;font-weight:500; }
-.setting-hint { font-size:.8rem;color:var(--text-dim);margin-top:.15rem; }
-.toggle-switch { position:relative;display:inline-block;width:40px;height:22px;flex-shrink:0; }
-.toggle-switch input { opacity:0;width:0;height:0; }
-.toggle-slider { position:absolute;inset:0;cursor:pointer;background:var(--border);border-radius:22px;transition:.2s; }
-.toggle-slider::before { content:'';position:absolute;height:16px;width:16px;left:3px;bottom:3px;background:white;border-radius:50%;transition:.2s; }
+/* ── Layout ── */
+.settings-layout {
+  display: grid;
+  grid-template-columns: 176px 1fr;
+  gap: 1.5rem;
+  align-items: start;
+}
+.settings-nav {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: .5rem 0 .6rem;
+  position: sticky;
+  top: 68px;
+}
+.settings-nav-group-label {
+  padding: .3rem .9rem .15rem;
+  font-size: .72rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: .06em;
+  color: var(--text-dim);
+}
+.settings-nav-item {
+  display: block;
+  width: calc(100% - .6rem);
+  margin: 0 .3rem;
+  text-align: left;
+  background: transparent;
+  border: none;
+  padding: .48rem .7rem;
+  font-size: .875rem;
+  font-weight: 500;
+  color: var(--text-dim);
+  cursor: pointer;
+  border-radius: 5px;
+  transition: background .12s, color .12s;
+  font-family: inherit;
+}
+.settings-nav-item:hover { background: var(--surface2); color: var(--text); }
+.settings-nav-item.active { background: var(--surface2); color: var(--accent); }
+.settings-nav-sep { height: 1px; background: var(--border); margin: .45rem .6rem; }
+.settings-content { min-width: 0; }
+.settings-section { display: none; }
+.settings-section.active { display: block; }
+
+/* ── Section header (title + inline action) ── */
+.settings-sec-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  margin-bottom: .9rem;
+  flex-wrap: wrap;
+}
+.settings-sec-head h2 { margin: 0; }
+
+/* ── Description ── */
+.settings-desc { color: var(--text-dim); font-size: .87rem; margin-bottom: 1rem; line-height: 1.6; }
+
+/* ── Setting rows ── */
+.setting-row { display:flex; align-items:center; justify-content:space-between; gap:1rem; padding:.75rem 0; border-top:1px solid var(--border); }
+.setting-label { font-size:.9rem; font-weight:500; }
+.setting-hint { font-size:.8rem; color:var(--text-dim); margin-top:.15rem; }
+.setting-ctrl { display:flex; align-items:center; gap:.5rem; flex-shrink:0; }
+.setting-msg { font-size:.82rem; margin-top:.35rem; min-height:1.2em; color:var(--text-dim); }
+.setting-msg-inline { font-size:.82rem; min-width:3rem; }
+
+/* ── Toggle switch ── */
+.toggle-switch { position:relative; display:inline-block; width:40px; height:22px; flex-shrink:0; }
+.toggle-switch input { opacity:0; width:0; height:0; }
+.toggle-slider { position:absolute; inset:0; cursor:pointer; background:var(--border); border-radius:22px; transition:.2s; }
+.toggle-slider::before { content:''; position:absolute; height:16px; width:16px; left:3px; bottom:3px; background:white; border-radius:50%; transition:.2s; }
 .toggle-switch input:checked + .toggle-slider { background:var(--accent); }
 .toggle-switch input:checked + .toggle-slider::before { transform:translateX(18px); }
 
-/* ── Dark-mode input ── */
+/* ── Text inputs ── */
 .settings-input {
   flex: 1;
-  max-width: 240px;
   padding: .4rem .65rem;
   border: 1px solid var(--border);
   border-radius: var(--radius);
@@ -213,18 +337,7 @@
 .settings-input::placeholder { color: var(--text-dim); }
 .settings-input:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
 
-/* ── Side-by-side panels ── */
-.user-panels {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 1.25rem;
-  align-items: start;
-}
-@media (max-width: 900px) {
-  .user-panels { grid-template-columns: 1fr; }
-}
-
-/* ── Row selection (no checkboxes) ── */
+/* ── Row selection ── */
 .sel-table tbody tr.selectable-row { cursor: pointer; user-select: none; }
 .sel-table tbody tr.selectable-row:hover { background: var(--surface2); }
 .sel-table tbody tr.row-selected { background: #dbeafe !important; }
@@ -242,9 +355,9 @@
   margin-bottom: .5rem;
   font-size: .85rem;
 }
-.sel-bar .btn { background:rgba(255,255,255,.2);border-color:rgba(255,255,255,.4);color:#fff; }
+.sel-bar .btn { background:rgba(255,255,255,.2); border-color:rgba(255,255,255,.4); color:#fff; }
 .sel-bar .btn:hover { background:rgba(255,255,255,.3); }
-.sel-bar .btn-danger { background:rgba(220,38,38,.8);border-color:rgba(220,38,38,.9); }
+.sel-bar .btn-danger { background:rgba(220,38,38,.8); border-color:rgba(220,38,38,.9); }
 .sel-bar-candidates { background: #059669; }
 
 /* ── Alias panel ── */
@@ -255,7 +368,7 @@
   padding: .85rem 1rem;
   margin-bottom: .75rem;
 }
-.alias-panel label { display:flex;align-items:center;gap:.5rem;font-size:.87rem;cursor:pointer; }
+.alias-panel label { display:flex; align-items:center; gap:.5rem; font-size:.87rem; cursor:pointer; }
 .alias-panel input[type=radio] { accent-color:var(--accent); }
 
 /* ── Alias tags ── */
@@ -270,32 +383,46 @@
   margin-right: .2rem;
   font-family: monospace;
 }
+
+/* ── Fixed-height user tables ── */
+.users-table-wrap { max-height: 260px; overflow-y: auto; }
+
+/* ── Mount rows (candidates page uses this) ── */
+.mount-row:hover { background: var(--bg-hover, rgba(127,127,127,.06)); }
+
+@media (max-width: 720px) {
+  .settings-layout { grid-template-columns: 1fr; }
+  .settings-nav { position: static; }
+}
 </style>
 
 <script>
-// ── Per-table selection state ──────────────────────────────────
+// ── Sidebar navigation ─────────────────────────────────────
+function showSection(id) {
+  document.querySelectorAll('.settings-section').forEach(s => s.classList.toggle('active', s.id === id));
+  document.querySelectorAll('.settings-nav-item').forEach(el => el.classList.toggle('active', el.dataset.section === id));
+  history.replaceState(null, '', '#' + id);
+}
+(function() {
+  const hash = location.hash.slice(1);
+  const ids = [...document.querySelectorAll('.settings-section')].map(s => s.id);
+  showSection(ids.includes(hash) ? hash : ids[0]);
+})();
+
+// ── Per-table selection state ──────────────────────────────
 const _sel = { confirmed: new Set(), candidates: new Set() };
 let _lastClicked = { confirmed: null, candidates: null };
 
 function rowClick(e, which, row) {
   const rows = [...document.querySelectorAll(`#${which === 'confirmed' ? 'confirmed' : 'candidates'}-tbody tr`)];
   const name = row.dataset.name;
-
   if (e.shiftKey && _lastClicked[which]) {
     const a = rows.indexOf(_lastClicked[which]), b = rows.indexOf(row);
     const [lo, hi] = a < b ? [a, b] : [b, a];
-    rows.slice(lo, hi + 1).forEach(r => {
-      _sel[which].add(r.dataset.name);
-      r.classList.add('row-selected');
-    });
+    rows.slice(lo, hi + 1).forEach(r => { _sel[which].add(r.dataset.name); r.classList.add('row-selected'); });
   } else {
-    if (_sel[which].has(name)) {
-      _sel[which].delete(name);
-      row.classList.remove('row-selected');
-    } else {
-      _sel[which].add(name);
-      row.classList.add('row-selected');
-    }
+    if (_sel[which].has(name)) { _sel[which].delete(name); row.classList.remove('row-selected'); }
+    else { _sel[which].add(name); row.classList.add('row-selected'); }
     _lastClicked[which] = row;
   }
   updateSelBar(which);
@@ -334,7 +461,7 @@ function clearSelection(which) {
   updateSelBar(which);
 }
 
-// ── Confirmed: bulk delete ─────────────────────────────────────
+// ── Confirmed: bulk delete ─────────────────────────────────
 async function bulkDeleteConfirmed() {
   const names = [..._sel.confirmed];
   if (!names.length) return;
@@ -352,17 +479,16 @@ async function bulkDeleteConfirmed() {
   } catch(e) { alert(e.message); }
 }
 
-// ── Confirmed: alias ───────────────────────────────────────────
+// ── Confirmed: alias ───────────────────────────────────────
 function openAliasPanel() {
   const names = [..._sel.confirmed];
   if (names.length < 2) return;
-  const panel = document.getElementById('alias-panel');
   const list = document.getElementById('alias-radio-list');
   list.innerHTML = names.map((n, i) =>
     `<label><input type="radio" name="alias-primary" value="${esc(n)}"${i===0?' checked':''}> <code>${esc(n)}</code></label>`
   ).join('');
   document.getElementById('alias-msg').textContent = '';
-  panel.style.display = '';
+  document.getElementById('alias-panel').style.display = '';
 }
 
 function closeAliasPanel() {
@@ -381,16 +507,12 @@ async function confirmAlias() {
       body: JSON.stringify({names, primary}),
     });
     const j = await r.json();
-    if (j.ok) {
-      msg.textContent = '✓ Merged. Reloading…';
-      setTimeout(() => location.reload(), 800);
-    } else {
-      msg.textContent = '✗ ' + (j.error || 'failed');
-    }
+    if (j.ok) { msg.textContent = '✓ Merged. Reloading…'; setTimeout(() => location.reload(), 800); }
+    else { msg.textContent = '✗ ' + (j.error || 'failed'); }
   } catch(e) { msg.textContent = '✗ ' + e.message; }
 }
 
-// ── Confirmed: add user ────────────────────────────────────────
+// ── Confirmed: add user ────────────────────────────────────
 async function addUser() {
   const input = document.getElementById('new-user');
   const name = input.value.trim();
@@ -404,12 +526,10 @@ async function addUser() {
     const j = await r.json();
     if (j.ok) {
       input.value = '';
-      msg.style.color = 'var(--green)';
-      msg.textContent = '✓ Added "' + name + '".';
+      msg.style.color = 'var(--green)'; msg.textContent = '✓ Added "' + name + '".';
       appendConfirmedRow(name);
     } else {
-      msg.style.color = 'var(--danger)';
-      msg.textContent = '✗ ' + (j.error || 'Add failed');
+      msg.style.color = 'var(--danger)'; msg.textContent = '✗ ' + (j.error || 'Add failed');
     }
   } catch(e) { msg.style.color='var(--danger)'; msg.textContent='✗ '+e.message; }
 }
@@ -420,15 +540,13 @@ function appendConfirmedRow(name) {
   const tbody = document.getElementById('confirmed-tbody');
   if (!tbody) { location.reload(); return; }
   const tr = document.createElement('tr');
-  tr.id = 'crow-' + name;
-  tr.dataset.name = name;
-  tr.className = 'selectable-row';
+  tr.id = 'crow-' + name; tr.dataset.name = name; tr.className = 'selectable-row';
   tr.setAttribute('onclick', `rowClick(event,'confirmed',this)`);
   tr.innerHTML = `<td><code style="font-size:.85rem;">${esc(name)}</code></td><td></td><td class="dimmed" style="font-size:.79rem;white-space:nowrap;">just now</td>`;
   tbody.appendChild(tr);
 }
 
-// ── Candidates: promote ────────────────────────────────────────
+// ── Candidates: promote ────────────────────────────────────
 async function promoteSelected() {
   const names = [..._sel.candidates];
   if (!names.length) return;
@@ -446,7 +564,7 @@ async function promoteSelected() {
   } catch(e) { alert(e.message); }
 }
 
-// ── Candidates: dismiss ────────────────────────────────────────
+// ── Candidates: dismiss ────────────────────────────────────
 async function dismissSelected() {
   const names = [..._sel.candidates];
   if (!names.length) return;
@@ -464,7 +582,7 @@ async function dismissSelected() {
   } catch(e) { alert(e.message); }
 }
 
-// ── Sync from scans ────────────────────────────────────────────
+// ── Sync from scans ────────────────────────────────────────
 async function syncFromScans() {
   const btn = document.getElementById('sync-btn');
   const res = document.getElementById('sync-result');
@@ -475,19 +593,40 @@ async function syncFromScans() {
     const j = await r.json();
     if (j.ok) {
       const {candidates, added} = j.data;
-      res.innerHTML = `<div class="success-banner">✓ Found ${candidates} names — added ${added} new candidate(s). Review and promote real users to confirmed.</div>`;
+      res.innerHTML = `<div class="success-banner">✓ Found ${candidates} names — added ${added} new candidate(s).</div>`;
       if (added > 0) setTimeout(() => location.reload(), 1800);
     } else {
       res.innerHTML = `<div class="error-banner">✗ ${j.error || 'Sync failed'}</div>`;
     }
   } catch(e) { res.innerHTML = `<div class="error-banner">✗ ${e.message}</div>`; }
-  btn.disabled = false; btn.textContent = '↻ Sync from scans';
+  btn.disabled = false; btn.innerHTML = '<svg class="icon"><use href="#i-refresh"/></svg> Sync from scans';
 }
 
-// ── Attribution toggle ─────────────────────────────────────────
+// ── Scan parallel workers ──────────────────────────────────
+async function saveParallel() {
+  const input = document.getElementById('parallel-input');
+  const msg = document.getElementById('parallel-msg');
+  const n = parseInt(input.value);
+  if (!n || n < 1 || n > 32) { msg.style.color='var(--danger)'; msg.textContent='1–32'; return; }
+  msg.style.color='var(--text-dim)'; msg.textContent='…';
+  try {
+    const r = await fetch('/api/settings/scan', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({max_parallel_scans: n}),
+    });
+    const j = await r.json();
+    if (j.ok) {
+      input.value = j.data.max_parallel_scans;
+      msg.style.color='var(--green)'; msg.textContent='✓';
+      setTimeout(() => msg.textContent='', 2000);
+    } else { msg.style.color='var(--danger)'; msg.textContent='✗'; }
+  } catch(e) { msg.style.color='var(--danger)'; msg.textContent='✗'; }
+}
+
+// ── Attribution toggle ─────────────────────────────────────
 async function saveToggle(enabled) {
   const msg = document.getElementById('toggle-msg');
-  msg.textContent = 'Saving…'; msg.style.color = 'var(--text-dim)';
+  msg.textContent='Saving…'; msg.style.color='var(--text-dim)';
   try {
     const r = await fetch('/api/settings', {
       method:'POST', headers:{'Content-Type':'application/json'},
@@ -495,7 +634,7 @@ async function saveToggle(enabled) {
     });
     const j = await r.json();
     if (j.ok) {
-      msg.style.color = 'var(--green)';
+      msg.style.color='var(--green)';
       msg.textContent = enabled
         ? '✓ Enabled. Reload the By User tab to see updated results.'
         : '✓ Disabled. By User tab will use uid-only attribution.';
@@ -503,14 +642,10 @@ async function saveToggle(enabled) {
   } catch(e) { msg.style.color='var(--danger)'; msg.textContent='✗ '+e.message; }
 }
 
-function esc(s) {
-  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
-}
-
-// ── Attribution cache ──────────────────────────────────────────
+// ── Attribution cache ──────────────────────────────────────
 async function clearCache() {
   const msg = document.getElementById('cache-msg');
-  msg.textContent = 'Clearing…'; msg.style.color = 'var(--text-dim)';
+  msg.textContent='Clearing…'; msg.style.color='var(--text-dim)';
   try {
     const r = await fetch('/api/settings/user-cache', {method:'DELETE'});
     const j = await r.json();
@@ -521,15 +656,19 @@ async function clearCache() {
 
 async function rebuildCache() {
   const msg = document.getElementById('cache-msg');
-  msg.textContent = 'Starting rebuild…'; msg.style.color = 'var(--text-dim)';
+  msg.textContent='Starting rebuild…'; msg.style.color='var(--text-dim)';
   try {
     const r = await fetch('/api/settings/user-cache/rebuild', {method:'POST'});
     const j = await r.json();
     if (j.ok) {
       msg.style.color='var(--green)';
-      msg.textContent=`✓ Rebuilding cache for ${j.data.mount_count} mount(s) in background.`;
+      msg.textContent=`✓ Rebuilding for ${j.data.mount_count} mount(s) in background.`;
     } else { msg.style.color='var(--danger)'; msg.textContent='✗ '+(j.error||'failed'); }
   } catch(e) { msg.style.color='var(--danger)'; msg.textContent='✗ '+e.message; }
+}
+
+function esc(s) {
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 }
 </script>
 {% endblock %}

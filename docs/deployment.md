@@ -104,9 +104,19 @@ To enable admin authentication, set `ADMIN_PASSWORD` in `.env`:
 ADMIN_PASSWORD=your-strong-password-here
 ```
 
-When set, all write operations (starting scans, deleting data, adding mounts) require login. The dashboard and analytics are still publicly visible.
+When set, all write operations (starting/stopping scans, deleting data, adding/removing mounts, modifying settings and users) require login. The dashboard and analytics pages are still publicly visible.
 
-To require auth for all pages, the template checks `auth_enabled` — currently read operations are open. This is suitable for internal/trusted networks.
+The admin user icon in the top-right nav bar shows login/logout options when auth is enabled.
+
+## Triggering scans from the web UI
+
+Scans can be started directly from the web panel without running the CLI:
+
+- **Run Scan page** (`/trigger`): choose mode (selected mounts, all mounts, or specific path), scan type (full or incremental), cold threshold, and exclude rules.
+- **Mount Points page**: right-click any mount → **Rescan**, or select multiple mounts and click **Scan** in the selection bar.
+- **Mount Detail page**: click **Scan This Mount**.
+
+Web-triggered scans run in background threads inside the web container. The scan detail page polls for live progress (files indexed, total size, elapsed time). Scans can be stopped mid-run via the **Stop** button.
 
 ## Containerising the scanner (advanced)
 

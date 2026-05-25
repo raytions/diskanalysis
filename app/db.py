@@ -191,6 +191,13 @@ def _migrate(eng):
         """))
         conn.commit()
 
+        # Add label column to mounts if missing
+        mnt_cols = {row[1] for row in conn.execute(text("PRAGMA table_info(mounts)"))}
+        if "label" not in mnt_cols:
+            conn.execute(text("ALTER TABLE mounts ADD COLUMN label TEXT DEFAULT ''"))
+            conn.commit()
+            logger.info("Migrated: added mounts.label column")
+
         # Add aliases column to custom_users if missing
         cu_cols = {row[1] for row in conn.execute(text("PRAGMA table_info(custom_users)"))}
         if "aliases" not in cu_cols:

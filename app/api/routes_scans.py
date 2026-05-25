@@ -184,6 +184,21 @@ def _mark_stopped(scan_id: int) -> None:
         db.close()
 
 
+def _wal_checkpoint() -> None:
+    """Passive WAL checkpoint: flush as many WAL pages as possible without blocking readers.
+    Called after each scan completes to prevent unbounded WAL growth."""
+    db = SessionLocal()
+    try:
+        from sqlalchemy import text
+        with db.bind.connect() as conn:
+            conn.execute(text("PRAGMA wal_checkpoint(PASSIVE)"))
+        logger.info("WAL checkpoint completed after scan")
+    except Exception as e:
+        logger.warning("WAL checkpoint failed: %s", e)
+    finally:
+        db.close()
+
+
 @router.delete("/scans")
 def delete_scans_batch(ids: list[int], request: Request, db: Session = Depends(get_db),
                        _: None = Depends(auth.require_admin)):
@@ -224,9 +239,13 @@ def _delete_scans_background(ids: list[int]) -> None:
 def create_scan(req: ScanCreateRequest, request: Request, db: Session = Depends(get_db),
                 _: None = Depends(auth.require_admin)):
     """
-    Trigger a new scan. Runs as a subprocess so the HTTP response returns immediately
-    and the process can be killed (even when blocked on stale NFS) via stop endpoint.
+    Trigger a new scan. Single-mount/path: one subprocess. Multi-mount: one subprocess
+    per mount launched in parallel, limited by the max_parallel_scans setting.
     """
+    if req.scan_mode in ("all_mounts", "selected_mounts"):
+        return _create_parallel_scan(req, db)
+
+    # ── Single subprocess (single_mount or path) ─────────────────────────────
     if req.scan_mode == "single_mount":
         if not req.mount_id:
             raise HTTPException(status_code=400, detail="mount_id required for single_mount mode")
@@ -234,16 +253,10 @@ def create_scan(req: ScanCreateRequest, request: Request, db: Session = Depends(
         if not mount:
             raise HTTPException(status_code=404, detail="Mount not found")
         target_path = mount.mount_point
-    elif req.scan_mode == "path":
+    else:  # path
         if not req.target_path:
             raise HTTPException(status_code=400, detail="target_path required for path mode")
         target_path = req.target_path
-    elif req.scan_mode == "selected_mounts":
-        if not req.mount_ids:
-            raise HTTPException(status_code=400, detail="mount_ids required for selected_mounts mode")
-        target_path = None
-    else:
-        target_path = None  # all_mounts
 
     scan = Scan(
         mount_id=req.mount_id,
@@ -260,33 +273,150 @@ def create_scan(req: ScanCreateRequest, request: Request, db: Session = Depends(
     db.add(scan)
     db.commit()
     db.refresh(scan)
-    scan_id = scan.id
 
-    # Serialize request for the subprocess
     req_b64 = base64.b64encode(json.dumps(req.model_dump()).encode()).decode()
-
     proc = subprocess.Popen(
-        [sys.executable, "-m", "app.scan_worker", str(scan_id), req_b64],
+        [sys.executable, "-m", "app.scan_worker", str(scan.id), req_b64],
         env=os.environ.copy(),
         cwd=os.getcwd(),
     )
-
-    # Store PID in DB so stop works even after server restart
     scan.worker_pid = proc.pid
     db.commit()
+    _active_procs[scan.id] = proc
+    logger.info("Launched scan %d as subprocess pid=%d (target=%s)", scan.id, proc.pid, target_path)
 
-    _active_procs[scan_id] = proc
-    logger.info("Launched scan %d as subprocess pid=%d (target=%s)", scan_id, proc.pid, target_path)
+    threading.Thread(target=_monitor_proc, args=(scan.id, proc), daemon=True,
+                     name=f"monitor-{scan.id}").start()
+    return ok(ScanSchema.model_validate(scan).model_dump())
 
-    # Monitor thread: cleans up when subprocess exits
+
+def _create_parallel_scan(req: ScanCreateRequest, db):
+    """Launch one subprocess per mount in parallel, limited by max_parallel_scans."""
+    from app.services import mounts as mount_svc
+    from app.api.routes_settings import get_max_parallel_scans
+    from sqlalchemy import text
+
+    mount_svc.refresh_mounts(db)
+
+    if req.scan_mode == "all_mounts":
+        mounts = db.query(Mount).filter(Mount.is_accessible == True).all()
+    else:
+        if not req.mount_ids:
+            raise HTTPException(status_code=400, detail="mount_ids required for selected_mounts mode")
+        mounts = db.query(Mount).filter(
+            Mount.id.in_(req.mount_ids), Mount.is_accessible == True
+        ).all()
+
+    if not mounts:
+        raise HTTPException(status_code=400, detail="No accessible mounts found")
+
+    with db.bind.connect() as conn:
+        max_parallel = get_max_parallel_scans(conn)
+
+    # Create one Scan record per mount
+    scan_list = []
+    req_b64_list = []
+    for mount in mounts:
+        mount_req = req.model_copy(update={
+            "scan_mode": "single_mount",
+            "mount_id": mount.id,
+            "mount_ids": None,
+            "target_path": mount.mount_point,
+        })
+        scan = Scan(
+            mount_id=mount.id,
+            started_at=datetime.now(),
+            status="running",
+            scan_mode="single_mount",
+            target_path=mount.mount_point,
+            filesystem_boundary_only=req.filesystem_boundary_only,
+            exclude_rules=req.exclude_rules,
+            cold_days=req.cold_days,
+            top_n=req.top_n,
+            stop_requested=False,
+        )
+        db.add(scan)
+        db.flush()
+        req_b64_list.append(base64.b64encode(json.dumps(mount_req.model_dump()).encode()).decode())
+        scan_list.append(scan)
+    db.commit()
+    for s in scan_list:
+        db.refresh(s)
+
+    scan_infos = [(s.id, rb64) for s, rb64 in zip(scan_list, req_b64_list)]
     threading.Thread(
-        target=_monitor_proc,
-        args=(scan_id, proc),
+        target=_launch_parallel_mounts,
+        args=(scan_infos, max_parallel),
         daemon=True,
-        name=f"monitor-{scan_id}",
+        name="parallel-scan-coordinator",
     ).start()
 
-    return ok(ScanSchema.model_validate(scan).model_dump())
+    logger.info("Queued %d parallel scans (max_parallel=%d): ids=%s",
+                len(scan_list), max_parallel, [s.id for s in scan_list])
+    return ok({
+        "multi": True,
+        "count": len(scan_list),
+        "scan_ids": [s.id for s in scan_list],
+        "scans": [ScanSchema.model_validate(s).model_dump() for s in scan_list],
+    })
+
+
+def _launch_parallel_mounts(scan_infos: list[tuple[int, str]], max_parallel: int) -> None:
+    """Launch scan subprocesses with max_parallel concurrency (semaphore-controlled)."""
+    sem = threading.Semaphore(max_parallel)
+
+    def run_one(scan_id: int, req_b64: str) -> None:
+        sem.acquire()
+        try:
+            actual_start = datetime.now()
+            # Update started_at to actual subprocess start time (not queue creation time).
+            # This must happen BEFORE Popen so the worker reads the correct value.
+            db_pre = SessionLocal()
+            try:
+                s = db_pre.get(Scan, scan_id)
+                if s and s.stop_requested:
+                    s.status = "stopped"
+                    s.finished_at = actual_start
+                    db_pre.commit()
+                    return
+                if s:
+                    s.started_at = actual_start
+                    db_pre.commit()
+            finally:
+                db_pre.close()
+
+            proc = subprocess.Popen(
+                [sys.executable, "-m", "app.scan_worker", str(scan_id), req_b64],
+                env=os.environ.copy(),
+                cwd=os.getcwd(),
+            )
+            db_pid = SessionLocal()
+            try:
+                s = db_pid.get(Scan, scan_id)
+                if s:
+                    s.worker_pid = proc.pid
+                    db_pid.commit()
+            finally:
+                db_pid.close()
+
+            _active_procs[scan_id] = proc
+            logger.info("Launched parallel scan %d (pid=%d)", scan_id, proc.pid)
+
+            proc.wait()
+            _active_procs.pop(scan_id, None)
+            if proc.returncode == 0:
+                from app.api.routes_mounts import invalidate_overview_cache
+                invalidate_overview_cache()
+                threading.Thread(target=_wal_checkpoint, daemon=True,
+                                 name=f"wal-ckpt-{scan_id}").start()
+            elif proc.returncode is not None and proc.returncode < 0:
+                _mark_stopped(scan_id)
+        finally:
+            sem.release()
+
+    for scan_id, req_b64 in scan_infos:
+        threading.Thread(target=run_one, args=(scan_id, req_b64), daemon=True,
+                         name=f"pscan-{scan_id}").start()
 
 
 def _monitor_proc(scan_id: int, proc: subprocess.Popen) -> None:
@@ -296,7 +426,11 @@ def _monitor_proc(scan_id: int, proc: subprocess.Popen) -> None:
     rc = proc.returncode
     logger.info("Scan %d subprocess exited (rc=%d)", scan_id, rc)
 
-    if rc is not None and rc < 0:
+    if rc == 0:
+        from app.api.routes_mounts import invalidate_overview_cache
+        invalidate_overview_cache()
+        threading.Thread(target=_wal_checkpoint, daemon=True, name=f"wal-ckpt-{scan_id}").start()
+    elif rc is not None and rc < 0:
         # Killed by signal (e.g. SIGKILL from stop endpoint or OOM)
         db = SessionLocal()
         try:

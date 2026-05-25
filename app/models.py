@@ -23,6 +23,7 @@ class Mount(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, onupdate=datetime.now)
     last_scanned_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    label: Mapped[str] = mapped_column(String, default="", server_default="")
 
     scans: Mapped[list["Scan"]] = relationship("Scan", back_populates="mount", cascade="all, delete-orphan")
     files: Mapped[list["File"]] = relationship("File", back_populates="mount", cascade="all, delete-orphan")

@@ -19,6 +19,15 @@ _SAFE = re.compile(r'^[a-zA-Z0-9_\-\.]+$')
 _SYSTEM_UID_MAX = 999  # uids <= this are considered system users
 
 
+def get_max_parallel_scans(conn) -> int:
+    """Read max_parallel_scans from app_settings; returns default 4 if not set."""
+    row = conn.execute(text("SELECT value FROM app_settings WHERE key='max_parallel_scans'")).fetchone()
+    try:
+        return max(1, min(int(row[0]), 32)) if row else 4
+    except (ValueError, TypeError):
+        return 4
+
+
 @router.get("")
 def get_settings(db: Session = Depends(get_db)):
     from app.services.analytics import get_path_attribution_enabled
@@ -41,6 +50,31 @@ def update_settings(req: SettingRequest, request: Request, db: Session = Depends
         _invalidate_cache(conn)
         conn.commit()
     return ok({"path_user_attribution": req.path_user_attribution})
+
+
+# ── Scan settings ────────────────────────────────────────────────────────────
+
+@router.get("/scan")
+def get_scan_settings(db: Session = Depends(get_db)):
+    with db.bind.connect() as conn:
+        n = get_max_parallel_scans(conn)
+    return ok({"max_parallel_scans": n})
+
+
+class ScanSettingsRequest(BaseModel):
+    max_parallel_scans: int
+
+
+@router.post("/scan")
+def update_scan_settings(req: ScanSettingsRequest, request: Request,
+                         db: Session = Depends(get_db), _=Depends(auth.require_admin)):
+    n = max(1, min(req.max_parallel_scans, 32))
+    with db.bind.connect() as conn:
+        conn.execute(text(
+            "INSERT OR REPLACE INTO app_settings (key, value) VALUES ('max_parallel_scans', :v)"
+        ), {"v": str(n)})
+        conn.commit()
+    return ok({"max_parallel_scans": n})
 
 
 # ── Confirmed users ───────────────────────────────────────────────────────────

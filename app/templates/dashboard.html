@@ -129,6 +129,10 @@ async function loadTab(tab, offset) {
     st.loaded = true;
     if (j.data.mount_map) _mountMap = Object.assign(_mountMap, j.data.mount_map);
     renderTab(tab, j.data);
+    if (j.data.total === -1) {
+      st.loaded = false;
+      setTimeout(() => loadTab(tab, st.offset), 3000);
+    }
   } catch(e) {
     container.innerHTML = `<p class="empty">Failed to load: ${e.message}</p>`;
     st.loaded = false;
@@ -175,7 +179,12 @@ function renderTab(tab, data) {
   const items = data.items;
   const pager = buildPager(tab);
   const el = document.getElementById('dtab-' + tab);
-  if (!items.length) { el.innerHTML = '<p class="empty">No data yet.</p>'; return; }
+  if (!items.length) {
+    el.innerHTML = data.total === -1
+      ? '<p class="empty">Computing… will refresh automatically.</p>'
+      : '<p class="empty">No data yet.</p>';
+    return;
+  }
 
   let html = '';
 

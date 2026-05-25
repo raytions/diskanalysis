@@ -4,7 +4,7 @@
 {% block content %}
 <div class="page-header">
   <div>
-    <a href="/mounts" class="back-link">&#8592; Mounts</a>
+    <a href="/mounts" class="back-link"><svg class="icon"><use href="#i-arrow-left"/></svg> Mounts</a>
     <h1>{{ mount.mount_point }}</h1>
     <div class="meta-row">
       <code>{{ mount.device }}</code>
@@ -14,7 +14,7 @@
     </div>
   </div>
   <div class="header-actions">
-    <button id="scan-this-btn" class="btn btn-primary" onclick="scanThis()">&#9654; Scan This</button>
+    <button id="scan-this-btn" class="btn btn-primary" onclick="scanThis()"><svg class="icon"><use href="#i-play"/></svg> Scan This</button>
     {% if not auth_enabled or is_admin %}
     <button class="btn" id="mount-action-btn" onclick="mountActionClick()" style="min-width:90px;">…</button>
     {% endif %}
@@ -374,8 +374,8 @@ function drawHistoryTable(el) {
   const adminTools = IS_ADMIN ? `
     <div id="hist-sel-bar" style="display:none;align-items:center;gap:.5rem;margin-bottom:.5rem;font-size:.83rem;">
       <span id="hist-sel-count" style="color:var(--text-dim);"></span>
-      <button onclick="deleteHistSel()" class="btn-icon btn-icon-danger" title="Delete selected">&#128465;</button>
-      <button onclick="clearHistSel()" class="btn-icon" title="Clear selection">&#10005;</button>
+      <button onclick="deleteHistSel()" class="btn-icon btn-icon-danger" title="Delete selected"><svg class="icon"><use href="#i-trash"/></svg></button>
+      <button onclick="clearHistSel()" class="btn-icon" title="Clear selection"><svg class="icon"><use href="#i-x"/></svg></button>
     </div>` : '';
 
   el.innerHTML = adminTools + `<div class="table-wrapper"><table class="data-table" id="hist-table">
@@ -620,11 +620,11 @@ async function scanThis() {
       window.location.href = '/scans/' + j.data.id;
     } else {
       alert('Failed to start scan: ' + (j.error || 'unknown'));
-      btn.disabled = false; btn.innerHTML = '&#9654; Scan This';
+      btn.disabled = false; btn.innerHTML = '<svg class="icon"><use href="#i-play"/></svg> Scan This';
     }
   } catch(e) {
     alert('Error: ' + e.message);
-    btn.disabled = false; btn.innerHTML = '&#9654; Scan This';
+    btn.disabled = false; btn.innerHTML = '<svg class="icon"><use href="#i-play"/></svg> Scan This';
   }
 }
 

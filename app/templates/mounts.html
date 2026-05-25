@@ -6,10 +6,9 @@
   <h1>Mount Points</h1>
   <div class="header-actions">
     {% if not auth_enabled or is_admin %}
-    <button class="btn" onclick="toggleAddForm()">&#43; Add Mount</button>
+    <button class="btn" onclick="toggleAddForm()"><svg class="icon"><use href="#i-plus"/></svg> Add Mount</button>
     {% endif %}
-    <button class="btn" onclick="refreshMounts()">&#8635; Refresh</button>
-    <a href="/scans" class="btn btn-primary">&#9654; Run Scan</a>
+    <button class="btn" onclick="refreshMounts()"><svg class="icon"><use href="#i-refresh"/></svg> Refresh</button>
   </div>
 </div>
 
@@ -88,50 +87,28 @@
   <div id="fields-ssh" class="mount-form-grid" style="display:none;margin-bottom:.75rem;">
     <div class="mount-form-field">
       <label>SSH Username</label>
-      <input type="text" id="ssh-user" placeholder="admin" oninput="autoFillLocal('ssh');updateMountCmd()" />
+      <input type="text" id="ssh-user" placeholder="admin" oninput="sshHeaderChanged();updateMountCmd()" />
     </div>
     <div class="mount-form-field">
       <label>SSH Host</label>
-      <input type="text" id="ssh-host" placeholder="192.168.1.50 or server.local" oninput="autoFillLocal('ssh');updateMountCmd()" />
+      <input type="text" id="ssh-host" placeholder="192.168.1.50 or server.local" oninput="sshHeaderChanged();updateMountCmd()" />
     </div>
     <div class="mount-form-field">
-      <label>Remote Path</label>
-      <input type="text" id="ssh-path" placeholder="/home/data" oninput="updateMountCmd()" />
+      <label>Server Alias <span style="font-weight:400;color:var(--text-dim)">(optional, used in local path names)</span></label>
+      <input type="text" id="ssh-alias" placeholder="yanlab" oninput="sshHeaderChanged();updateMountCmd()" />
     </div>
     <div class="mount-form-field">
-      <label>SSH Port (optional)</label>
+      <label>Port</label>
       <input type="text" id="ssh-port" placeholder="22" oninput="updateMountCmd()" />
     </div>
+    <div class="mount-form-field">
+      <label>Private Key Path <span style="font-weight:400;color:var(--text-dim)">(on this server)</span></label>
+      <input type="text" id="ssh-keypath" placeholder="~/.ssh/id_ed25519" oninput="updateMountCmd()" />
+    </div>
     <div class="mount-form-field" style="grid-column:1/-1">
-      <label>Authentication</label>
-      <div style="display:flex;gap:.75rem;align-items:center;margin-top:.25rem;">
-        <label style="display:flex;align-items:center;gap:.3rem;font-size:.83rem;font-weight:400;cursor:pointer;">
-          <input type="radio" name="ssh-auth" value="password" checked onchange="updateSSHAuth()" /> Password
-        </label>
-        <label style="display:flex;align-items:center;gap:.3rem;font-size:.83rem;font-weight:400;cursor:pointer;">
-          <input type="radio" name="ssh-auth" value="key" onchange="updateSSHAuth()" /> SSH Key
-        </label>
-      </div>
-    </div>
-    <div class="mount-form-field" id="ssh-pass-field">
-      <label>Password</label>
-      <input type="password" id="ssh-pass" placeholder="SSH password" />
-    </div>
-    <div class="mount-form-field" id="ssh-key-field" style="display:none">
-      <label>Private Key Path (on this server)</label>
-      <input type="text" id="ssh-keypath" placeholder="/root/.ssh/id_rsa or ~/.ssh/id_ed25519" />
-    </div>
-    <div class="mount-form-field" id="ssh-keypass-field" style="display:none">
-      <label>Key Passphrase (if encrypted)</label>
-      <input type="password" id="ssh-keypass" placeholder="leave empty if key has no passphrase" />
-    </div>
-    <div class="mount-form-field">
-      <label>Local Mount Point</label>
-      <input type="text" id="ssh-local" placeholder="/media/ssh-server" oninput="updateMountCmd()" />
-    </div>
-    <div class="mount-form-field">
-      <label>Description (optional)</label>
-      <input type="text" id="ssh-desc" />
+      <label>Remote Paths</label>
+      <div id="ssh-paths-list"></div>
+      <button type="button" onclick="addSshPath()" class="btn" style="margin-top:.35rem;padding:.25rem .6rem;font-size:.8rem;">+ Add path</button>
     </div>
   </div>
 
@@ -199,7 +176,10 @@
   </label>
   {% if not auth_enabled or is_admin %}
   <span id="sel-label" style="margin-left:auto;font-size:.82rem;color:var(--text-dim);visibility:hidden;"></span>
-  <button type="button" id="sel-delete" class="btn btn-danger btn-sm" disabled onclick="deleteSelected()">Delete</button>
+  <div id="sel-actions" style="display:none;gap:.35rem;align-items:center;">
+    <button type="button" id="sel-scan" class="btn btn-primary btn-sm" style="min-width:5rem;" onclick="scanSelected()">Scan</button>
+    <button type="button" id="sel-delete" class="btn btn-danger btn-sm" style="min-width:5rem;" onclick="deleteSelected()">Delete</button>
+  </div>
   {% endif %}
 </form>
 
@@ -217,7 +197,6 @@
       <th class="num sortable" data-col="free_bytes" onclick="sortTable(this)">Free</th>
       <th class="sortable" data-col="usage_percent" onclick="sortTable(this)">Usage</th>
       <th>Last Scanned</th>
-      <th></th>
     </tr>
   </thead>
   <tbody id="mounts-tbody">
@@ -229,13 +208,19 @@
         data-used_bytes="{{ m.used_bytes }}"
         data-free_bytes="{{ m.free_bytes }}"
         data-usage_percent="{{ m.usage_percent }}"
-        onclick="handleRowClick(event, this)">
-      <td>
-        <span class="mount-dot {% if m.mount_point in mounted_paths %}dot-green{% else %}dot-red{% endif %}" style="margin-right:.35rem;vertical-align:middle;"></span>
-        <strong>{{ m.mount_point }}</strong>
-        {% if m.is_network_fs %}<span class="badge badge-net">NAS</span>{% endif %}
+        onclick="handleRowClick(event, this)"
+        oncontextmenu="showCtxMenu(event, {{ m.id }}, {{ ('`' + m.label + '`') if m.label else '``' }})">
+      <td title="{{ m.mount_point }}">
+        <div class="mnt-path-cell">
+          <span class="mount-dot {% if m.mount_point in mounted_paths %}dot-green{% else %}dot-red{% endif %}" style="flex-shrink:0;"></span>
+          <span class="mnt-path-text">
+            {% if m.label %}<strong>{{ m.label }}</strong> <span class="dimmed" style="font-size:.8rem;">{{ m.mount_point }}</span>
+            {% else %}<strong>{{ m.mount_point }}</strong>{% endif %}
+          </span>
+          {% if m.is_network_fs %}<span class="badge badge-net" style="flex-shrink:0;">NAS</span>{% endif %}
+        </div>
       </td>
-      <td class="dimmed">{{ m.device }}</td>
+      <td class="dimmed" title="{{ m.device }}"><div class="mnt-dev-cell">{{ m.device }}</div></td>
       <td><code>{{ m.fs_type }}</code></td>
       <td class="num">{{ m.total_bytes | fmt_bytes }}</td>
       <td class="num">{{ m.used_bytes | fmt_bytes }}</td>
@@ -248,7 +233,6 @@
         {{ m.usage_percent }}%
       </td>
       <td class="dimmed">{{ m.last_scanned_at.strftime('%Y-%m-%d %H:%M') if m.last_scanned_at else '—' }}</td>
-      <td><a href="/mounts/{{ m.id }}" class="btn btn-sm" onclick="event.stopPropagation()">Detail</a></td>
     </tr>
     {% endfor %}
   </tbody>
@@ -261,11 +245,28 @@
 </div>
 {% endif %}
 
+<!-- Right-click context menu -->
+<div id="mnt-ctx-menu" style="display:none;position:fixed;z-index:9000;background:var(--surface);border:1px solid var(--border);border-radius:7px;box-shadow:0 4px 18px rgba(0,0,0,.18);padding:.3rem 0;min-width:160px;font-size:.87rem;">
+  <div class="ctx-item" onclick="_ctxAction('edit')">Edit label</div>
+  <div class="ctx-item" onclick="_ctxAction('select')" id="ctx-select-item">Select</div>
+  <div class="ctx-divider"></div>
+  <div class="ctx-item" onclick="_ctxAction('rescan')">Rescan</div>
+  <div class="ctx-divider"></div>
+  <div class="ctx-item ctx-danger" onclick="_ctxAction('delete')">Delete</div>
+</div>
+
 <script>
 // ── Add-mount form ──────────────────────────────────────
 function toggleAddForm() {
   const f = document.getElementById('add-mount-form');
   f.style.display = f.style.display === 'none' ? 'block' : 'none';
+}
+
+// Wrap bare IPv6 addresses in [] for NFS/mount syntax (e.g. 2a0c:... → [2a0c:...])
+function nfsHost(raw) {
+  const h = raw.trim();
+  if (h.includes(':') && !h.startsWith('[')) return '[' + h + ']';
+  return h;
 }
 
 function updateFormFields() {
@@ -276,14 +277,7 @@ function updateFormFields() {
     document.getElementById(ids[k]).style.display = types.includes(v) ? 'grid' : 'none';
   });
   document.getElementById('test-result').style.display = 'none';
-  updateMountCmd();
-}
-
-function updateSSHAuth() {
-  const isKey = document.querySelector('input[name="ssh-auth"]:checked').value === 'key';
-  document.getElementById('ssh-pass-field').style.display = isKey ? 'none' : '';
-  document.getElementById('ssh-key-field').style.display = isKey ? '' : 'none';
-  document.getElementById('ssh-keypass-field').style.display = isKey ? '' : 'none';
+  if (v === 'fuse.sshfs' && !document.querySelector('#ssh-paths-list .ssh-path-row')) addSshPath();
   updateMountCmd();
 }
 
@@ -292,28 +286,76 @@ function autoFillLocal(type) {
     const host = (document.getElementById('nfs-host').value.trim()).replace(/[^a-zA-Z0-9._-]/g,'');
     const el = document.getElementById('nfs-local');
     if (host && !el.dataset.edited) el.value = '/media/' + host;
-  } else if (type === 'ssh') {
-    const host = (document.getElementById('ssh-host').value.trim()).replace(/[^a-zA-Z0-9._-]/g,'');
-    const el = document.getElementById('ssh-local');
-    if (host && !el.dataset.edited) el.value = '/media/ssh-' + host;
   } else if (type === 'smb') {
     const share = (document.getElementById('smb-share').value.trim()).replace(/[^a-zA-Z0-9._-]/g,'');
     const el = document.getElementById('smb-local');
     if (share && !el.dataset.edited) el.value = '/media/' + share;
   }
 }
-// Mark as manually edited so auto-fill stops overwriting
-['nfs-local','ssh-local','smb-local'].forEach(id => {
+['nfs-local','smb-local'].forEach(id => {
   const el = document.getElementById(id);
   if (el) el.addEventListener('input', () => el.dataset.edited = '1');
 });
+
+// ── SSH multi-path management ────────────────────────────
+let _sshSeq = 0;
+
+function _sshAutoFillRow(row) {
+  const localEl = row.querySelector('.ssh-local');
+  if (localEl.dataset.edited) return;
+  const alias = document.getElementById('ssh-alias').value.trim().replace(/[^a-zA-Z0-9._-]/g,'');
+  const host = (document.getElementById('ssh-host').value.trim()).replace(/[^a-zA-Z0-9._-]/g,'');
+  const prefix = alias || host;
+  if (!prefix) return;
+  const remote = row.querySelector('.ssh-remote').value.trim();
+  const last = remote.split('/').filter(Boolean).pop();
+  const suffix = last ? '-' + last.replace(/[^a-zA-Z0-9._-]/g,'') : '';
+  localEl.value = '/media/ssh-' + prefix + suffix;
+}
+
+function sshHeaderChanged() {
+  document.querySelectorAll('#ssh-paths-list .ssh-path-row').forEach(_sshAutoFillRow);
+}
+
+function addSshPath() {
+  const id = ++_sshSeq;
+  const row = document.createElement('div');
+  row.className = 'ssh-path-row';
+  row.dataset.rowId = id;
+  row.innerHTML =
+    '<div><div class="ssh-col-label">Remote path</div>' +
+    '<input type="text" class="ssh-remote" placeholder="/mnt/raid"' +
+    ' oninput="_sshAutoFillRow(this.closest(\'.ssh-path-row\'));updateMountCmd()" /></div>' +
+    '<div><div class="ssh-col-label">Local mount point</div>' +
+    '<input type="text" class="ssh-local" placeholder="/media/ssh-server-raid"' +
+    ' oninput="updateMountCmd()" /></div>' +
+    '<button type="button" class="ssh-remove-btn" onclick="removeSshPath(this.closest(\'.ssh-path-row\'))" title="Remove row">×</button>';
+  row.querySelector('.ssh-local').addEventListener('input', function(){ this.dataset.edited = '1'; });
+  document.getElementById('ssh-paths-list').appendChild(row);
+  _sshAutoFillRow(row);
+  updateMountCmd();
+}
+
+function removeSshPath(row) {
+  const list = document.getElementById('ssh-paths-list');
+  if (list.querySelectorAll('.ssh-path-row').length <= 1) return;
+  row.remove();
+  updateMountCmd();
+}
+
+function getSshPaths() {
+  return [...document.querySelectorAll('#ssh-paths-list .ssh-path-row')].map(r => ({
+    remote: r.querySelector('.ssh-remote').value.trim() || '/',
+    local: r.querySelector('.ssh-local').value.trim(),
+  })).filter(p => p.local);
+}
 
 function getMountFormData() {
   const fs = document.getElementById('add-fs-type').value;
   let mountPoint = '', device = '', desc = '', ssh = null;
   if (['nfs4','nfs'].includes(fs)) {
     mountPoint = document.getElementById('nfs-local').value.trim();
-    const host = document.getElementById('nfs-host').value.trim();
+    const host = nfsHost(document.getElementById('nfs-host').value);
     const exp = document.getElementById('nfs-export').value.trim();
     device = host + ':' + exp;
     desc = document.getElementById('nfs-desc').value.trim();
@@ -324,18 +366,16 @@ function getMountFormData() {
     desc = document.getElementById('smb-desc').value.trim();
   } else if (fs === 'fuse.sshfs') {
     const user = document.getElementById('ssh-user').value.trim();
-    const host = document.getElementById('ssh-host').value.trim();
-    const path = document.getElementById('ssh-path').value.trim();
+    const rawHost = document.getElementById('ssh-host').value.trim();
+    const host = nfsHost(rawHost);
     const port = parseInt(document.getElementById('ssh-port').value || '22') || 22;
-    const authType = document.querySelector('input[name="ssh-auth"]:checked')?.value || 'password';
-    mountPoint = document.getElementById('ssh-local').value.trim();
-    device = user + '@' + host + ':' + path;
-    desc = document.getElementById('ssh-desc').value.trim();
-    ssh = {
-      username: user, host, remote_path: path || '/', local_path: mountPoint, port,
-      password: authType === 'password' ? (document.getElementById('ssh-pass').value || '') : '',
-      key_path: authType === 'key' ? (document.getElementById('ssh-keypath').value.trim() || '') : '',
-    };
+    const keyPath = document.getElementById('ssh-keypath').value.trim();
+    const paths = getSshPaths();
+    const first = paths[0] || { remote: '/', local: '' };
+    mountPoint = first.local;
+    device = user + '@' + host + ':' + first.remote;
+    desc = first.remote;
+    ssh = { _paths: paths, username: user, host: rawHost, port, key_path: keyPath, password: '' };
   } else if (['ext4','xfs','btrfs'].includes(fs)) {
     mountPoint = document.getElementById('local-path').value.trim();
     device = mountPoint;
@@ -353,7 +393,7 @@ function getMountFormData() {
 function getMountCommand() {
   const fs = document.getElementById('add-fs-type').value;
   if (['nfs4','nfs'].includes(fs)) {
-    const host = document.getElementById('nfs-host').value.trim();
+    const host = nfsHost(document.getElementById('nfs-host').value);
     const exp = document.getElementById('nfs-export').value.trim();
     const local = document.getElementById('nfs-local').value.trim();
     if (!host || !local) return null;
@@ -367,18 +407,32 @@ function getMountCommand() {
     return `mkdir -p ${local}\nsudo mount -t cifs ${srv}/${share} ${local}${user ? ' -o username='+user : ''}`;
   } else if (fs === 'fuse.sshfs') {
     const user = document.getElementById('ssh-user').value.trim();
-    const host = document.getElementById('ssh-host').value.trim();
-    const path = document.getElementById('ssh-path').value.trim();
-    const local = document.getElementById('ssh-local').value.trim();
+    const rawHost = document.getElementById('ssh-host').value.trim();
+    const host = nfsHost(rawHost);
     const port = document.getElementById('ssh-port').value.trim();
-    const authType = document.querySelector('input[name="ssh-auth"]:checked')?.value || 'password';
-    const keyPath = authType === 'key' ? document.getElementById('ssh-keypath').value.trim() : '';
-    if (!user || !host || !local) return null;
-    let opts = '-o StrictHostKeyChecking=no -o reconnect';
-    if (port && port !== '22') opts += ` -p ${port}`;
-    if (keyPath) opts += ` -o IdentityFile=${keyPath}`;
-    // sshfs runs as the current user (no sudo needed, FUSE is user-space)
-    return `mkdir -p ${local}\nsshfs ${opts} ${user}@${host}:${path||'/'} ${local}`;
+    const keyPath = document.getElementById('ssh-keypath').value.trim();
+    const paths = getSshPaths();
+    if (!user || !host || !paths.length) return null;
+
+    let baseOpts = '-o StrictHostKeyChecking=no -o reconnect';
+    if (port && port !== '22') baseOpts += ` -p ${port}`;
+    if (keyPath) baseOpts += ` -o IdentityFile=${keyPath}`;
+
+    if (paths.length === 1) {
+      return `mkdir -p ${paths[0].local}\nsshfs ${baseOpts} ${user}@${host}:${paths[0].remote} ${paths[0].local}`;
+    }
+
+    // Multiple paths: SSH ControlMaster shares the connection — password entered once
+    const ctlHost = rawHost.replace(/[^a-zA-Z0-9._-]/g, '_');
+    const ctlPath = `/tmp/sshctl-${user}@${ctlHost}`;
+    let sshMasterArgs = `-fNM -o StrictHostKeyChecking=no -o ControlPath=${ctlPath} -o ControlPersist=120`;
+    if (port && port !== '22') sshMasterArgs += ` -p ${port}`;
+    if (keyPath) sshMasterArgs += ` -i ${keyPath}`;
+    const sshfsOpts = `${baseOpts} -o ControlPath=${ctlPath}`;
+    const mountLines = paths.map(p =>
+      `mkdir -p ${p.local}\nsshfs ${sshfsOpts} ${user}@${host}:${p.remote} ${p.local}`
+    ).join('\n');
+    return `# Enter password once to open shared connection:\nssh ${sshMasterArgs} ${user}@${host}\n\n# Mount all paths (no further password needed):\n${mountLines}`;
   }
   return null;
 }
@@ -438,20 +492,37 @@ async function addMount() {
   spinner.style.display = 'inline'; btn.disabled = true;
 
   try {
-    // For SSH type: try to actually mount via sshfs first
     if (data._ssh) {
-      if (!data._ssh.username || !data._ssh.host) { showAddErr('SSH username and host are required.'); return; }
-      spinner.textContent = 'Connecting via SSH…';
-      const mr = await fetch('/api/mounts/mount-ssh', {
-        method: 'POST', headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify(data._ssh)
-      });
-      const mj = await mr.json();
-      if (!mj.ok) { showAddErr(mj.error || 'SSH mount request failed.'); return; }
-      if (!mj.data.mounted && !mj.data.already) {
-        showAddErr((mj.data.error || 'SSH mount failed') + (mj.data.command ? '\n\n' + mj.data.command : ''));
-        return;
+      const { _paths, ...sshBase } = data._ssh;
+      if (!sshBase.username || !sshBase.host) { showAddErr('SSH username and host are required.'); return; }
+      const paths = _paths?.length ? _paths : [{ remote: '/', local: data.mount_point }];
+      const displayHost = nfsHost(sshBase.host);
+      for (const p of paths) {
+        if (!p.local) continue;
+        spinner.textContent = `Mounting ${p.remote}…`;
+        const mr = await fetch('/api/mounts/mount-ssh', {
+          method: 'POST', headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({ ...sshBase, remote_path: p.remote, local_path: p.local }),
+        });
+        const mj = await mr.json();
+        if (!mj.ok) { showAddErr(mj.error || 'SSH mount request failed.'); return; }
+        if (!mj.data.mounted && !mj.data.already) {
+          showAddErr((mj.data.error || 'SSH mount failed') + (mj.data.command ? '\n\n' + mj.data.command : ''));
+          return;
+        }
+        spinner.textContent = `Registering ${p.remote}…`;
+        const r = await fetch('/api/mounts', {
+          method: 'POST', headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({
+            mount_point: p.local, fs_type: 'fuse.sshfs', is_network_fs: true,
+            device: `${sshBase.username}@${displayHost}:${p.remote}`,
+            description: p.remote,
+          }),
+        });
+        const j = await r.json();
+        if (!j.ok && !j.error?.includes('already')) { showAddErr(j.error || 'Failed to register mount.'); return; }
       }
+      location.reload(); return;
     }
 
     spinner.textContent = 'Registering…';
@@ -476,37 +547,119 @@ function showAddErr(msg) {
   el.style.whiteSpace = 'pre-wrap'; el.textContent = msg; el.style.display = 'block';
 }
 
-// ── Multi-select ─────────────────────────────────────────
+// ── Context menu ─────────────────────────────────────────
+let _ctxMountId = null, _ctxLabel = '';
+const _ctxMenu = document.getElementById('mnt-ctx-menu');
+
+function showCtxMenu(e, mountId, label) {
+  e.preventDefault();
+  e.stopPropagation();
+  _ctxMountId = mountId;
+  _ctxLabel = label || '';
+  document.getElementById('ctx-select-item').textContent = selected.has(String(mountId)) ? 'Deselect' : 'Select';
+  const menu = _ctxMenu;
+  menu.style.display = 'block';
+  const vw = window.innerWidth, vh = window.innerHeight;
+  let x = e.clientX, y = e.clientY;
+  menu.style.left = x + 'px'; menu.style.top = y + 'px';
+  const rect = menu.getBoundingClientRect();
+  if (rect.right > vw) menu.style.left = (x - rect.width) + 'px';
+  if (rect.bottom > vh) menu.style.top = (y - rect.height) + 'px';
+}
+
+function hideCtxMenu() { _ctxMenu.style.display = 'none'; }
+document.addEventListener('click', hideCtxMenu);
+document.addEventListener('keydown', e => { if (e.key === 'Escape') hideCtxMenu(); });
+
+async function _ctxAction(action) {
+  hideCtxMenu();
+  const id = _ctxMountId;
+  if (!id) return;
+  if (action === 'detail') {
+    window.location = '/mounts/' + id;
+  } else if (action === 'select') {
+    const row = document.querySelector(`#mounts-tbody tr[data-id="${id}"]`);
+    const sid = String(id);
+    if (selected.has(sid)) { selected.delete(sid); row?.classList.remove('row-selected'); }
+    else { selected.add(sid); row?.classList.add('row-selected'); }
+    lastSelected = row;
+    updateSelectionUI();
+    return;
+  } else if (action === 'edit') {
+    const newLabel = prompt('Display label for this mount (leave empty to clear):', _ctxLabel);
+    if (newLabel === null) return;
+    const r = await fetch('/api/mounts/' + id, {
+      method: 'PATCH', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ label: newLabel }),
+    });
+    if ((await r.json()).ok) location.reload();
+    else alert('Failed to update label.');
+  } else if (action === 'rescan') {
+    const r = await fetch('/api/scans', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ scan_mode: 'single_mount', mount_id: id }),
+    });
+    const j = await r.json();
+    if (j.ok) { showToast('Rescan started.', 2500); }
+    else alert('Failed to start rescan: ' + (j.detail || j.error || 'unknown error'));
+  } else if (action === 'delete') {
+    const row = document.querySelector(`#mounts-tbody tr[data-id="${id}"]`);
+    const mp = row?.dataset.mount_point || 'this mount';
+    if (!confirm('Remove "' + mp + '" from the registry?\n\nThis does not unmount the filesystem.')) return;
+    const r = await fetch('/api/mounts/' + id, { method: 'DELETE' });
+    if ((await r.json()).ok) { showToast('Deleted.', 2000); setTimeout(() => location.reload(), 800); }
+    else alert('Delete failed.');
+  }
+}
+
+// ── Row click / multi-select ─────────────────────────────
 let lastSelected = null;
 const selected = new Set();
 
 function handleRowClick(event, row) {
   if (event.target.tagName === 'A' || event.target.tagName === 'BUTTON') return;
+  hideCtxMenu();
   const id = row.dataset.id;
-  if (event.shiftKey && lastSelected) {
-    const rows = [...document.querySelectorAll('#mounts-tbody tr[data-selectable]')];
-    const a = rows.indexOf(lastSelected), b = rows.indexOf(row);
-    const [lo, hi] = a < b ? [a, b] : [b, a];
-    rows.slice(lo, hi+1).forEach(r => { selected.add(r.dataset.id); r.classList.add('row-selected'); });
-  } else {
-    if (selected.has(id)) { selected.delete(id); row.classList.remove('row-selected'); }
-    else { selected.add(id); row.classList.add('row-selected'); }
-    lastSelected = row;
+  if (selected.size > 0) {
+    const sid = String(id);
+    if (selected.has(sid)) { selected.delete(sid); row.classList.remove('row-selected'); }
+    else { selected.add(sid); row.classList.add('row-selected'); lastSelected = row; }
+    updateSelectionUI();
+    return;
   }
-  updateSelectionUI();
+  window.location = '/mounts/' + id;
 }
 
 function updateSelectionUI() {
   const label = document.getElementById('sel-label');
-  const btn = document.getElementById('sel-delete');
-  if (!label) return;
+  const actions = document.getElementById('sel-actions');
   if (selected.size > 0) {
-    label.style.visibility = ''; label.textContent = selected.size + ' selected';
-    btn.disabled = false;
+    if (label) { label.style.visibility = ''; label.textContent = selected.size + ' selected'; }
+    if (actions) actions.style.display = 'flex';
   } else {
-    label.style.visibility = 'hidden'; label.textContent = '';
-    btn.disabled = true;
+    if (label) { label.style.visibility = 'hidden'; label.textContent = ''; }
+    if (actions) actions.style.display = 'none';
   }
+}
+
+async function scanSelected() {
+  if (!selected.size) return;
+  let started = 0, errors = 0;
+  for (const id of [...selected]) {
+    try {
+      const r = await fetch('/api/scans', {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ scan_mode: 'single_mount', mount_id: parseInt(id) }),
+      });
+      const j = await r.json();
+      if (j.ok) started++;
+      else errors++;
+    } catch(e) { errors++; }
+  }
+  const msg = errors
+    ? `⚠ ${started} scan(s) started, ${errors} failed.`
+    : `${started} scan(s) started.`;
+  showToast(msg, 3000);
 }
 
 async function deleteSelected() {

@@ -5,6 +5,8 @@ import logging
 import os
 import shutil
 import subprocess
+import threading
+import time
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
@@ -21,6 +23,58 @@ from app import auth
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api")
 
+# ── In-process overview cache ─────────────────────────────────────────────────
+# Caches: mount_scan_pairs, tab counts, users aggregation.
+# TTL=60s so stale data expires quickly after a scan completes.
+_OV_CACHE: dict = {}
+_OV_TTL = 60
+
+
+def _oc_get(key: str):
+    entry = _OV_CACHE.get(key)
+    if entry and time.monotonic() - entry[1] < _OV_TTL:
+        return entry[0]
+    return None
+
+
+def _oc_set(key: str, value) -> None:
+    _OV_CACHE[key] = (value, time.monotonic())
+
+
+def invalidate_overview_cache() -> None:
+    """Call after a scan completes so the next tab load sees fresh data."""
+    _OV_CACHE.clear()
+
+
+def _batch_latest_scan_ids(db, mount_ids: list[int]) -> dict[int, int]:
+    """Return {mount_id: latest_scan_id} using 1 query on the scans table.
+    Prefers completed scans, falls back to any finished scan (stopped/interrupted).
+    Never queries the files table — that's O(N) over millions of rows."""
+    from sqlalchemy import text
+    if not mount_ids:
+        return {}
+    ids_str = ",".join(str(i) for i in mount_ids)
+    with db.bind.connect() as conn:
+        # One query: rank by preferred status then by id DESC, take top per mount
+        rows = conn.execute(text(f"""
+            SELECT mount_id, id FROM (
+                SELECT mount_id, id,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY mount_id
+                        ORDER BY
+                            CASE status WHEN 'completed' THEN 0
+                                        WHEN 'stopped' THEN 1
+                                        WHEN 'interrupted' THEN 2
+                                        ELSE 3 END,
+                            id DESC
+                    ) AS rn
+                FROM scans
+                WHERE mount_id IN ({ids_str})
+                  AND status IN ('completed','stopped','interrupted')
+            ) WHERE rn=1
+        """)).fetchall()
+    return {r[0]: r[1] for r in rows}
+
 
 @router.get("/health")
 def health():
@@ -36,30 +90,36 @@ def dashboard_overview_tab(
 ):
     """Paginated data for Global Overview tabs: files, dirs, cold, users, dupes."""
     from sqlalchemy import text as sqlt
-    from app.services.analytics import _latest_scan_id_for_mount, _collect_known_usernames
+    from app.services.analytics import _collect_known_usernames
 
     mounts = db.query(Mount).filter(Mount.is_accessible == True).all()
     mount_map = {str(m.id): m.mount_point for m in mounts}
 
-    # Build (mount_id, scan_id) pairs — preserves per-mount granularity for UNION ALL
-    mount_scan_pairs: list[tuple[int, int]] = []
-    seen: set = set()
-    for m in mounts:
-        sid = _latest_scan_id_for_mount(db, m.id)
-        if sid is not None and (m.id, sid) not in seen:
-            mount_scan_pairs.append((m.id, sid))
-            seen.add((m.id, sid))
+    # Build mount_scan_pairs using batch lookup (2 queries) + 60s in-process cache.
+    # Old approach called _latest_scan_id_for_mount per-mount (N×2 queries for N mounts).
+    mount_scan_pairs: list[tuple[int, int]] = _oc_get("mount_scan_pairs")
+    if mount_scan_pairs is None:
+        scan_id_map = _batch_latest_scan_ids(db, [m.id for m in mounts])
+        seen: set = set()
+        mount_scan_pairs = []
+        for m in mounts:
+            sid = scan_id_map.get(m.id)
+            if sid is not None and (m.id, sid) not in seen:
+                mount_scan_pairs.append((m.id, sid))
+                seen.add((m.id, sid))
+        _oc_set("mount_scan_pairs", mount_scan_pairs)
 
     if not mount_scan_pairs:
         return ok({"items": [], "total": 0, "limit": limit, "offset": offset, "mount_map": mount_map})
 
     sids = list({sid for _, sid in mount_scan_pairs})
     sid_in = ",".join(str(s) for s in sids)
-    sub_n = offset + limit  # rows each mount sub-query contributes
+    sub_n = offset + limit
+
+    # Stable cache key for this combination of mounts/scans
+    pairs_key = ",".join(f"{mid}:{sid}" for mid, sid in sorted(mount_scan_pairs))
 
     def _union_files(extra_where: str = "") -> str:
-        """UNION ALL of per-mount file queries using ix_files_ms_size covering index.
-        Each part is wrapped in SELECT…FROM(subquery) so ORDER BY LIMIT is valid inside UNION ALL."""
         parts = [
             f"SELECT id,path,size_bytes,extension,mtime,atime,is_cold,cold_days_bucket,mount_id FROM ("
             f"SELECT id,path,size_bytes,extension,mtime,atime,is_cold,cold_days_bucket,mount_id "
@@ -80,25 +140,47 @@ def dashboard_overview_tab(
         return " UNION ALL ".join(parts)
 
     def _count_files(extra_where: str = "") -> int:
-        parts = [
-            f"SELECT COUNT(*) AS c FROM files "
-            f"WHERE mount_id={mid} AND scan_id={sid} AND is_symlink=0{extra_where}"
-            for mid, sid in mount_scan_pairs
-        ]
-        with db.bind.connect() as conn:
-            return conn.execute(sqlt(
-                f"SELECT SUM(c) FROM ({' UNION ALL '.join(parts)})"
-            )).fetchone()[0] or 0
+        count_key = f"cnt:f:{extra_where}:{pairs_key}"
+        cached = _oc_get(count_key)
+        if cached is not None:
+            return cached
+        if extra_where == "":
+            # Use pre-computed totals from scans table — O(1) vs O(N_files)
+            with db.bind.connect() as conn:
+                result = conn.execute(sqlt(
+                    f"SELECT COALESCE(SUM(total_files),0) FROM scans WHERE id IN ({sid_in})"
+                )).fetchone()[0] or 0
+        elif extra_where == " AND is_cold=1":
+            with db.bind.connect() as conn:
+                result = conn.execute(sqlt(
+                    f"SELECT COALESCE(SUM(cold_file_count),0) FROM scans WHERE id IN ({sid_in})"
+                )).fetchone()[0] or 0
+        else:
+            # Fallback for any other filter: count from files table
+            parts = [
+                f"SELECT COUNT(*) AS c FROM files "
+                f"WHERE mount_id={mid} AND scan_id={sid} AND is_symlink=0{extra_where}"
+                for mid, sid in mount_scan_pairs
+            ]
+            with db.bind.connect() as conn:
+                result = conn.execute(sqlt(
+                    f"SELECT SUM(c) FROM ({' UNION ALL '.join(parts)})"
+                )).fetchone()[0] or 0
+        _oc_set(count_key, result)
+        return result
 
     def _count_dirs() -> int:
-        parts = [
-            f"SELECT COUNT(*) AS c FROM directories WHERE mount_id={mid} AND scan_id={sid}"
-            for mid, sid in mount_scan_pairs
-        ]
+        count_key = f"cnt:d:{pairs_key}"
+        cached = _oc_get(count_key)
+        if cached is not None:
+            return cached
+        # Use pre-computed totals from scans table — O(1) vs O(N_dirs)
         with db.bind.connect() as conn:
-            return conn.execute(sqlt(
-                f"SELECT SUM(c) FROM ({' UNION ALL '.join(parts)})"
+            result = conn.execute(sqlt(
+                f"SELECT COALESCE(SUM(total_dirs),0) FROM scans WHERE id IN ({sid_in})"
             )).fetchone()[0] or 0
+        _oc_set(count_key, result)
+        return result
 
     if tab == "files":
         union = _union_files()
@@ -139,45 +221,102 @@ def dashboard_overview_tab(
                  for r in rows]
 
     elif tab == "users":
-        from app.services.analytics import _build_user_agg_per_mount, get_path_attribution_enabled
-        # Collect known usernames (local passwd + custom_users) and check toggle
+        from app.services.analytics import get_user_summary, _settings_hash
+        from collections import defaultdict
         with db.bind.connect() as conn:
-            path_attr = get_path_attribution_enabled(conn)
-            known_usernames, uid_to_canonical, name_to_canonical = _collect_known_usernames(conn, f"scan_id IN ({sid_in})")
-        mount_triples = [(mid, sid, mount_map[str(mid)]) for mid, sid in mount_scan_pairs]
-        with db.bind.connect() as conn:
-            agg = _build_user_agg_per_mount(conn, mount_triples, known_usernames, uid_to_canonical,
-                                            path_attribution=path_attr, name_to_canonical=name_to_canonical)
-        all_users = sorted(
-            [{"username": n, "file_count": v["file_count"], "total_size_bytes": v["total_size_bytes"],
-              "uids": ",".join(sorted(v["uids"], key=lambda x: int(x) if x.isdigit() else 0))}
-             for n, v in agg.items()],
-            key=lambda x: -x["total_size_bytes"],
-        )
+            shash = _settings_hash(conn)
+        users_key = f"users:{pairs_key}:{shash}"
+        all_users = _oc_get(users_key)
+        if all_users is None:
+            combined: dict = defaultdict(lambda: {"file_count": 0, "total_size_bytes": 0, "uids": set()})
+            missing = []
+            if mount_scan_pairs:
+                # Single batch query against DB attribution cache — no per-mount Python loop
+                pair_filter = " OR ".join(f"(mount_id={mid} AND scan_id={sid})" for mid, sid in mount_scan_pairs)
+                with db.bind.connect() as conn:
+                    db_rows = conn.execute(sqlt(
+                        f"SELECT mount_id, scan_id, username, uids, file_count, total_size_bytes "
+                        f"FROM user_attribution_cache WHERE settings_hash=:sh AND ({pair_filter})"
+                    ), {"sh": shash}).fetchall()
+                cached_pairs = {(r[0], r[1]) for r in db_rows}
+                missing = [(mid, sid) for mid, sid in mount_scan_pairs if (mid, sid) not in cached_pairs]
+                for row in db_rows:
+                    name, uids_str, fc, tsb = row[2], row[3] or "", row[4], row[5]
+                    combined[name]["file_count"] += fc
+                    combined[name]["total_size_bytes"] += tsb
+                    for u in uids_str.split(","):
+                        u = u.strip()
+                        if u and u != "—":
+                            combined[name]["uids"].add(u)
+            if missing:
+                # Compute attribution for uncached mounts in background,
+                # then clear key so next request re-fetches the now-complete DB cache.
+                def _bg_fill_users(key: str, pairs: list) -> None:
+                    from app.db import SessionLocal
+                    _db = SessionLocal()
+                    try:
+                        for _mid, _sid in pairs:
+                            try:
+                                get_user_summary(_db, _mid, limit=500, scan_id=_sid)
+                            except Exception:
+                                pass
+                    finally:
+                        _db.close()
+                    _OV_CACHE.pop(key, None)
+                import threading
+                threading.Thread(target=_bg_fill_users, args=(users_key, missing),
+                                 daemon=True, name="users-bg-fill").start()
+            all_users = sorted(
+                [{"username": n, "file_count": v["file_count"], "total_size_bytes": v["total_size_bytes"],
+                  "uids": ",".join(sorted(v["uids"], key=lambda x: int(x) if x.isdigit() else 0))}
+                 for n, v in combined.items()],
+                key=lambda x: -x["total_size_bytes"],
+            )
+            _oc_set(users_key, all_users)
         total = len(all_users)
         items = all_users[offset: offset + limit]
 
     elif tab == "dupes":
+        # basename() UDF forces a full-table scan — run the whole query in background.
+        # First request returns empty+total=-1 immediately; subsequent requests serve from cache.
         dup_sql = f"""
             SELECT basename(path) AS fname, size_bytes, COUNT(*) AS cnt,
                    SUM(size_bytes) AS wasted, GROUP_CONCAT(path, '|||') AS paths
             FROM files
             WHERE scan_id IN ({sid_in}) AND is_symlink=0 AND size_bytes >= 1048576
             GROUP BY fname, size_bytes HAVING cnt > 1
-            ORDER BY wasted DESC LIMIT :limit OFFSET :offset
+            ORDER BY wasted DESC LIMIT 1000 OFFSET 0
         """
-        count_sql = f"""
-            SELECT COUNT(*) FROM (
-              SELECT 1 FROM files WHERE scan_id IN ({sid_in}) AND is_symlink=0 AND size_bytes >= 1048576
-              GROUP BY basename(path), size_bytes HAVING COUNT(*) > 1
-            )
-        """
-        with db.bind.connect() as conn:
-            raw_rows = conn.execute(sqlt(dup_sql), {"limit": limit, "offset": offset}).fetchall()
-            total = conn.execute(sqlt(count_sql)).fetchone()[0]
-        items = [{"filename": r[0], "size_bytes": r[1], "count": r[2], "wasted_bytes": r[3],
-                  "paths": r[4].split("|||") if r[4] else []}
-                 for r in raw_rows]
+        dupes_key = f"data:dupes:{sid_in}"
+        cached_dupes = _oc_get(dupes_key)
+        if cached_dupes is None:
+            cached_dupes = {"items": [], "total": -1}
+            _oc_set(dupes_key, cached_dupes)  # mark pending so parallel requests skip re-launch
+
+            def _bg_dupes(key: str, sql: str) -> None:
+                from app.db import SessionLocal
+                _db = SessionLocal()
+                try:
+                    with _db.bind.connect() as _conn:
+                        rows = _conn.execute(sqlt(sql)).fetchall()
+                    result = [
+                        {"filename": r[0], "size_bytes": r[1], "count": r[2], "wasted_bytes": r[3],
+                         "paths": r[4].split("|||") if r[4] else []}
+                        for r in rows
+                    ]
+                    _oc_set(key, {"items": result, "total": len(result)})
+                except Exception:
+                    _OV_CACHE.pop(key, None)
+                finally:
+                    _db.close()
+
+            import threading
+            threading.Thread(target=_bg_dupes, args=(dupes_key, dup_sql),
+                             daemon=True, name="dupes-bg").start()
+
+        all_items = cached_dupes["items"]
+        total = cached_dupes["total"]
+        items = all_items[offset: offset + limit]
 
     else:
         return ok({"items": [], "total": 0, "limit": limit, "offset": offset, "mount_map": mount_map})
@@ -226,7 +365,8 @@ class SSHMountRequest(BaseModel):
 def mount_ssh_fs(req: SSHMountRequest, request: Request, db: Session = Depends(get_db), _: None = Depends(auth.require_admin)):
     """Attempt to mount a remote SSH path via sshfs. Returns the sshfs command regardless."""
     local = req.local_path.rstrip("/") or "/"
-    remote = f"{req.username}@{req.host}:{req.remote_path}"
+    host = f"[{req.host}]" if ":" in req.host else req.host
+    remote = f"{req.username}@{host}:{req.remote_path}"
 
     # Build the sshfs command for display
     opts = ["-o", "StrictHostKeyChecking=no", "-o", "ServerAliveInterval=15", "-o", "reconnect"]
@@ -409,27 +549,58 @@ def unmount_fs(mount_id: int, request: Request, db: Session = Depends(get_db), _
                "error": None if success else msg})
 
 
+class MountPatchRequest(BaseModel):
+    label: str | None = None
+
+
+@router.patch("/mounts/{mount_id}")
+def patch_mount(mount_id: int, req: MountPatchRequest, request: Request,
+                db: Session = Depends(get_db), _: None = Depends(auth.require_admin)):
+    m = db.query(Mount).get(mount_id)
+    if not m:
+        raise HTTPException(status_code=404, detail="Mount not found")
+    if req.label is not None:
+        m.label = req.label.strip()
+    db.commit()
+    return ok(MountSchema.model_validate(m).model_dump())
+
+
 @router.delete("/mounts/{mount_id}")
 def delete_mount(mount_id: int, request: Request, db: Session = Depends(get_db), _: None = Depends(auth.require_admin)):
     from sqlalchemy import text
     m = db.query(Mount).get(mount_id)
     if not m:
         raise HTTPException(status_code=404, detail="Mount not found")
-    # Best-effort unmount before removing from DB (only if it's a FUSE user-space mount)
+    # Best-effort unmount for FUSE filesystems
     fs_type = _check_proc_mounts(m.mount_point)
     if fs_type and "fuse" in fs_type.lower():
         _try_unmount(m.mount_point)
-    # Raw SQL to avoid cascade-loading millions of File ORM objects
+    # Delete mount + scans immediately (fast), then purge files/dirs in background.
+    # Doing it synchronously risks an HTTP timeout for large mounts (millions of rows).
     with db.bind.connect() as conn:
-        rows = conn.execute(text("SELECT id FROM scans WHERE mount_id = :mid"), {"mid": mount_id}).fetchall()
-        if rows:
-            id_list = ",".join(str(r[0]) for r in rows)
-            conn.execute(text(f"DELETE FROM files WHERE scan_id IN ({id_list})"))
-            conn.execute(text(f"DELETE FROM directories WHERE scan_id IN ({id_list})"))
-            conn.execute(text(f"DELETE FROM scan_errors WHERE scan_id IN ({id_list})"))
+        scan_rows = conn.execute(text("SELECT id FROM scans WHERE mount_id = :mid"), {"mid": mount_id}).fetchall()
+        scan_ids = [r[0] for r in scan_rows]
+        if scan_ids:
+            conn.execute(text(f"DELETE FROM scan_errors WHERE scan_id IN ({','.join(str(i) for i in scan_ids)})"))
             conn.execute(text("DELETE FROM scans WHERE mount_id = :mid"), {"mid": mount_id})
         conn.execute(text("DELETE FROM mounts WHERE id = :mid"), {"mid": mount_id})
         conn.commit()
+    if scan_ids:
+        def _bg_purge(ids: list[int]) -> None:
+            from app.db import SessionLocal
+            _db = SessionLocal()
+            try:
+                id_str = ",".join(str(i) for i in ids)
+                with _db.bind.connect() as conn:
+                    conn.execute(text(f"DELETE FROM directories WHERE scan_id IN ({id_str})"))
+                    conn.execute(text(f"DELETE FROM files WHERE scan_id IN ({id_str})"))
+                    conn.commit()
+                logger.info("Background purge done for scan_ids %s", ids)
+            except Exception as e:
+                logger.warning("Background purge failed: %s", e)
+            finally:
+                _db.close()
+        threading.Thread(target=_bg_purge, args=(scan_ids,), daemon=True, name=f"purge-{mount_id}").start()
     return ok({"deleted": mount_id})
 
 

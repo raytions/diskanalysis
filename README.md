@@ -8,13 +8,14 @@ A self-hosted disk analysis web panel for Linux servers with many NAS mount poin
 
 ## Features
 
-- **Mount management** — auto-discover system mounts; manually register NFS/SMB/sshfs mounts; live mount status (green/red dot); one-click mount/unmount from the detail page
-- **Scanning** — full or incremental scan; per-mount, all mounts, or arbitrary path; configurable cold-data threshold and exclude rules
+- **Mount management** — auto-discover system mounts; manually register NFS/SMB/sshfs mounts; live mount status (green/red dot); one-click mount/unmount from the detail page; SSH ControlMaster multi-path commands (single password for multiple sshfs mounts)
+- **Scanning** — full or incremental scan; per-mount, all mounts, or arbitrary path; configurable cold-data threshold and exclude rules; background thread execution with live progress; stop running scans
 - **By File / By Directory** — largest files and directories, sortable and searchable
 - **Cold Data** — files not accessed in N days, filterable by directory prefix
 - **By Extension** — aggregate disk usage by file type
-- **By User** — per-user disk usage with NFS4 uid-squash support; cached after first computation; pre-warmed automatically after each scan
-- **Settings** — confirmed user list with aliases, candidate sync from scan data, path attribution toggle, attribution cache management
+- **By User** — per-user disk usage with NFS4 uid-squash support; depth-1 and depth-2 directory matching; cached after first computation; pre-warmed automatically after each scan
+- **Settings** — sidebar navigation; confirmed user list with aliases; candidate sync from scan data; path attribution toggle; attribution cache management
+- **Auth** — optional session-based admin authentication
 
 ---
 
@@ -23,13 +24,16 @@ A self-hosted disk analysis web panel for Linux servers with many NAS mount poin
 ### 1. Install scanner dependencies on the host
 
 ```bash
-cd /opt/diskanalysis
+# Python 3.14+: no venv available, install system-wide
+pip install -r requirements.txt --break-system-packages
+
+# Or with a venv (Python < 3.14)
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 
 cp .env.example .env
-# Edit .env — set DB_PATH to a path both the scanner and the web container can reach
+# Edit .env — set DB_PATH to a path both the scanner and web container can reach
 ```
 
 ### 2. Run a first scan
@@ -47,8 +51,8 @@ python -m app.scanner scan --all-mounts
 # Scan one mount
 python -m app.scanner scan --mount /mnt/nas1
 
-# Scan a specific path, 180-day cold threshold, top 200 results
-python -m app.scanner scan --path /mnt/nas1/projectA --cold-days 180 --top-n 200
+# Scan a specific path, 180-day cold threshold
+python -m app.scanner scan --path /mnt/nas1/projectA --cold-days 180
 
 # Exclude paths or globs
 python -m app.scanner scan --mount /mnt/nas1 --exclude /mnt/nas1/.trash,*.tmp
@@ -77,6 +81,7 @@ docker compose up -d
 | `NETWORK_FS_TYPES` | `nfs,nfs4,cifs,smb3,...` | FS types treated as network mounts |
 | `LOG_LEVEL` | `INFO` | Logging verbosity |
 | `PATH_USER_ATTRIBUTION` | `true` | Attribute files by top-level directory name before uid (useful for NFS4 uid-squash). Can also be toggled in the Settings UI. |
+| `ADMIN_PASSWORD` | `` | If set, enables session-based admin auth. Leave empty for open access. |
 
 ---
 
@@ -145,9 +150,22 @@ Set `SCAN_ROOTS=/host/mnt` in `.env`. Note that `shutil.disk_usage` and `/proc/m
 
 Without xdev protection, scanning `/mnt` on a server with 30 NAS mounts would recursively descend into all of them. `--one-filesystem` (default: on) uses `os.stat().st_dev` to detect filesystem boundaries and skips them. Always leave this on in NAS environments.
 
+### SSH ControlMaster for sshfs multi-path mounts
+
+When a manually-registered sshfs mount has multiple remote paths, the UI generates a single-password mount sequence using SSH ControlMaster:
+
+```bash
+# Enter password once to open a shared background connection:
+ssh -fNM -o StrictHostKeyChecking=no -o ControlPath=/tmp/sshctl-user@host -o ControlPersist=120 user@host
+
+# Mount all paths (no further password needed):
+sshfs -o ControlPath=/tmp/sshctl-user@host user@host:/remote/path1 /local/path1
+sshfs -o ControlPath=/tmp/sshctl-user@host user@host:/remote/path2 /local/path2
+```
+
 ### By User — NFS4 uid-squash problem
 
-NFS4 `all_squash` mounts assign a single uid to every file regardless of actual ownership. Path-based attribution (`PATH_USER_ATTRIBUTION=true`) matches top-level directory names against a curated user list, then falls back to uid for unmatched files. Each file is counted exactly once. See [docs/user-attribution.md](docs/user-attribution.md) for details.
+NFS4 `all_squash` mounts assign a single uid to every file regardless of actual ownership. Path-based attribution (`PATH_USER_ATTRIBUTION=true`) matches top-level directory names against a curated user list (with depth-2 fallback for intermediate container directories), then falls back to uid for unmatched files. Each file is counted exactly once. See [docs/user-attribution.md](docs/user-attribution.md) for details.
 
 ---
 

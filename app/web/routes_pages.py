@@ -154,8 +154,10 @@ def scan_detail_page(request: Request, scan_id: int, db: Session = Depends(get_d
 def settings_page(request: Request, db: Session = Depends(get_db)):
     from sqlalchemy import text
     from app.services.analytics import get_path_attribution_enabled
+    from app.api.routes_settings import get_max_parallel_scans
     with db.bind.connect() as conn:
         path_attr = get_path_attribution_enabled(conn)
+        max_parallel_scans = get_max_parallel_scans(conn)
         users = conn.execute(text(
             "SELECT username, aliases, created_at FROM custom_users ORDER BY username"
         )).fetchall()
@@ -164,6 +166,7 @@ def settings_page(request: Request, db: Session = Depends(get_db)):
         )).fetchall()
     return _tr(request, "settings.html", {
         "path_user_attribution": path_attr,
+        "max_parallel_scans": max_parallel_scans,
         "users": [{"username": r[0],
                    "aliases": [a.strip() for a in (r[1] or "").split(",") if a.strip()],
                    "created_at": r[2]} for r in users],

@@ -87,6 +87,8 @@ See [Deployment](deployment.md) for systemd timer and cron setup.
 - On a 26-mount NFS server with 7.5M files, a full scan takes ~10–20 minutes.
 - Incremental scans are much faster (skip unchanged files by mtime).
 - After each scan, the `directories` table is rebuilt with cumulative sizes — this enables fast "largest directory" queries without scanning the `files` table.
+- After each scan completes, the user attribution cache is automatically rebuilt in a background thread.
+- A WAL checkpoint (`PRAGMA wal_checkpoint(PASSIVE)`) is run after each scan to prevent unbounded WAL growth when running many concurrent scans.
 
 ## atime / cold data caveats
 

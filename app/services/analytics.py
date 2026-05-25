@@ -5,7 +5,7 @@ All functions accept an open SQLAlchemy Session and return plain Python
 structures (dicts / lists) for easy JSON serialisation.
 """
 import logging
-from sqlalchemy import func, text
+from sqlalchemy import case, func, text
 from sqlalchemy.orm import Session
 
 from app.models import Directory, File, Scan, ScanError
@@ -14,23 +14,24 @@ logger = logging.getLogger(__name__)
 
 
 def _latest_scan_id_for_mount(db: Session, mount_id: int) -> int | None:
-    # Prefer a mount-specific completed scan first
+    # Prefer completed, then stopped, then interrupted — all on scans table (never files).
     row = (
         db.query(Scan.id)
-        .filter(Scan.mount_id == mount_id, Scan.status == "completed")
-        .order_by(Scan.finished_at.desc())
+        .filter(
+            Scan.mount_id == mount_id,
+            Scan.status.in_(["completed", "stopped", "interrupted"]),
+        )
+        .order_by(
+            case(
+                (Scan.status == "completed", 0),
+                (Scan.status == "stopped", 1),
+                else_=2,
+            ),
+            Scan.id.desc(),
+        )
         .first()
     )
-    if row:
-        return row[0]
-    # Fall back: find the most recent scan_id that has files for this mount.
-    # Use MAX(scan_id) — fast with the ix_files_mount_scan index.
-    max_scan_id = (
-        db.query(func.max(File.scan_id))
-        .filter(File.mount_id == mount_id)
-        .scalar()
-    )
-    return max_scan_id
+    return row[0] if row else None
 
 
 _FILE_SORT_COLS = {"size_bytes": File.size_bytes, "mtime": File.mtime, "atime": File.atime, "extension": File.extension, "path": File.path}
@@ -549,12 +550,31 @@ def get_dashboard_summary(db: Session) -> dict:
         db.query(Scan).order_by(Scan.started_at.desc()).limit(5).all()
     )
 
-    # Collect per-mount latest scan IDs for true cross-mount aggregation
-    latest_scan_ids = []
-    for mount in mounts:
-        sid = _latest_scan_id_for_mount(db, mount.id)
-        if sid:
-            latest_scan_ids.append(sid)
+    # Batch lookup: 1 query on scans table only (never touches files table)
+    mount_ids = [m.id for m in mounts]
+    if mount_ids:
+        ids_str = ",".join(str(i) for i in mount_ids)
+        with db.bind.connect() as conn:
+            rows = conn.execute(text(f"""
+                SELECT mount_id, id FROM (
+                    SELECT mount_id, id,
+                        ROW_NUMBER() OVER (
+                            PARTITION BY mount_id
+                            ORDER BY
+                                CASE status WHEN 'completed' THEN 0
+                                            WHEN 'stopped' THEN 1
+                                            WHEN 'interrupted' THEN 2
+                                            ELSE 3 END,
+                                id DESC
+                        ) AS rn
+                    FROM scans
+                    WHERE mount_id IN ({ids_str})
+                      AND status IN ('completed','stopped','interrupted')
+                ) WHERE rn=1
+            """)).fetchall()
+        latest_scan_ids = list({r[1] for r in rows})
+    else:
+        latest_scan_ids = []
 
     if latest_scan_ids:
         latest_scans = db.query(Scan).filter(Scan.id.in_(latest_scan_ids)).all()

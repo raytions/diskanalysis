@@ -45,7 +45,7 @@ This handles NAS layouts where user directories are placed inside an intermediat
 
 ### Phase 2 — Uid fallback for unmatched files
 
-Files that are **not** under any Phase 1a or 1b–matched directory are attributed by uid. The query excludes matched directories (using `NOT IN` for depth-1 comps and `NOT LIKE` for depth-2 prefixes), so there is no double-counting.
+Files that are **not** under any Phase 1a or 1b–matched directory are attributed by uid. The query excludes matched directories (using `NOT IN` for depth-1 and `NOT LIKE` for depth-2 prefixes), so there is no double-counting.
 
 This handles:
 - Root-owned and system files
@@ -65,21 +65,23 @@ Only names matching `[a-zA-Z0-9_\-\.]+` are used for path matching.
 
 ## Managing users — Settings page
 
-Go to **Settings** to manage the user lists used for attribution.
+Go to **Settings** (gear icon in the top-right nav) to manage user lists.
+
+The Settings page uses a sidebar layout: click **Users** in the left nav to see both Confirmed Users and Candidates on one page.
 
 ### Confirmed Users
 
 The authoritative list. These names are used for Phase 1 directory matching and uid resolution.
 
-- **Add**: type a username and press Enter
-- **Alias**: select two or more entries and click "Alias" to merge them under a primary name (e.g. merge `jh` and `jiahao` → `jiahao`)
-- **Delete**: select entries and click "Delete"
+- **Add**: type a username and press Enter (or click the add button)
+- **Alias**: click the link icon next to an entry to assign an alias (e.g. merge `jh` → `jiahao`)
+- **Delete**: click the trash icon to remove a user
 
 ### Candidates
 
 A read-only pool populated by **Sync from Scans**, which scans the `directories` table and `/etc/passwd` to find likely usernames. Candidates do **not** affect attribution — they are suggestions only.
 
-- **Promote**: select candidates and click "Add to Confirmed" to move them to Confirmed Users
+- **Add to Confirmed**: move a candidate into the Confirmed Users list
 - **Dismiss**: discard candidates that are not relevant
 
 This two-stage workflow prevents accidental overwriting of the curated Confirmed list when re-syncing.
@@ -97,14 +99,16 @@ Computing the "By User" breakdown involves scanning millions of file records. To
 | Scan completes | Cache rebuilt automatically for all scanned mounts (background thread) |
 | Confirmed Users changed | Cache invalidated — recomputed on next "By User" load |
 | Path attribution toggle changed | Cache invalidated — recomputed on next "By User" load |
-| First "By User" load after a cache miss | Recomputed and stored (may take 1–3 minutes for very large mounts) |
+| First "By User" load after a cache miss | Recomputed and stored (may take 1–5 minutes for very large mounts) |
+
+The cache rebuild after a scan is batched: all mounts are queried at once rather than one by one, which avoids N separate DB connections for servers with 20+ mounts.
 
 ### Manual cache management
 
-In **Settings → Attribution Cache**:
+In **Settings → Attribution**:
 
 - **Rebuild Now** — invalidates the cache and starts a background rebuild for all mounts
-- **Clear Cache** — deletes all cached results (next load will recompute on demand)
+- Cache status and last-computed timestamps are shown per-mount
 
 ---
 
