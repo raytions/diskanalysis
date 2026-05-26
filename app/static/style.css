@@ -253,6 +253,8 @@ a:hover { text-decoration: underline; }
 .badge-danger { background: #fee2e2; color: #991b1b; border-color: #fecaca; }
 .badge-cold { background: #e0f2fe; color: #075985; border-color: #bae6fd; }
 .badge-stopped { background: #fef3c7; color: #92400e; border-color: #fde68a; }
+.badge-queued { background: #f3f4f6; color: #374151; border-color: #d1d5db; }
+.badge-interrupted { background: #fef3c7; color: #92400e; border-color: #fde68a; }
 .badge-lg { font-size: .9rem; padding: .3rem .8rem; }
 
 [data-theme="dark"] .badge-completed { background: #14532d; color: #86efac; border-color: #166534; }
@@ -261,6 +263,8 @@ a:hover { text-decoration: underline; }
 [data-theme="dark"] .badge-net { background: #2e1065; color: #c4b5fd; border-color: #5b21b6; }
 [data-theme="dark"] .badge-cold { background: #0c4a6e; color: #7dd3fc; border-color: #075985; }
 [data-theme="dark"] .badge-stopped { background: #451a03; color: #fbbf24; border-color: #92400e; }
+[data-theme="dark"] .badge-queued { background: #1f2937; color: #9ca3af; border-color: #374151; }
+[data-theme="dark"] .badge-interrupted { background: #451a03; color: #fbbf24; border-color: #92400e; }
 
 /* ── Filter bar ── */
 .filter-bar {
@@ -401,7 +405,10 @@ select option { background: var(--surface); color: var(--text); }
 @media (max-width: 700px) { .mount-form-grid { grid-template-columns: 1fr; } }
 
 /* Scans history table — truncate target path only when long */
-#scans-table .scan-target-cell { max-width: 36ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#scans-table { table-layout: fixed; width: 100%; }
+#scans-table th:nth-child(2) { width: auto; }
+#scans-table td:nth-child(2) { overflow: hidden; max-width: 0; }
+#scans-table .scan-target-cell { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%; }
 
 /* Mount points table — natural auto-layout, truncate only when content is long */
 .mnt-path-cell { display: flex; align-items: center; gap: .3rem; max-width: 32ch; }

@@ -165,6 +165,17 @@ def get_extension_summary(
         scan_id = _latest_scan_id_for_mount(db, mount_id)
     if scan_id is None:
         return []
+
+    # Try pre-computed summary table first (new scans)
+    with db.bind.connect() as conn:
+        rows = conn.execute(text(
+            "SELECT extension, file_count, total_bytes FROM scan_ext_summary "
+            "WHERE mount_id=:m AND scan_id=:s ORDER BY total_bytes DESC LIMIT :l"
+        ), {"m": mount_id, "s": scan_id, "l": limit}).fetchall()
+    if rows:
+        return [{"extension": r[0] or "(none)", "file_count": r[1], "total_size_bytes": r[2] or 0} for r in rows]
+
+    # Fallback: GROUP BY on files table (old scans without scan_ext_summary)
     rows = (
         db.query(
             File.extension,
@@ -178,11 +189,7 @@ def get_extension_summary(
         .all()
     )
     return [
-        {
-            "extension": r.extension or "(none)",
-            "file_count": r.file_count,
-            "total_size_bytes": r.total_size_bytes or 0,
-        }
+        {"extension": r.extension or "(none)", "file_count": r.file_count, "total_size_bytes": r.total_size_bytes or 0}
         for r in rows
     ]
 
@@ -277,9 +284,9 @@ def get_path_attribution_enabled(conn) -> bool:
     return settings.PATH_USER_ATTRIBUTION
 
 
-def _collect_known_usernames(conn, where_sql: str) -> tuple[set, dict, dict]:
+def _collect_known_usernames(conn, mount_id: int, scan_id: int) -> tuple[set, dict, dict]:
     """
-    Query distinct uids in the file set, resolve to real usernames.
+    Collect distinct uids and resolve to real usernames for a scan.
     Also includes names and aliases from the custom_users table.
 
     Returns (known_names, uid_to_canonical, name_to_canonical):
@@ -292,9 +299,16 @@ def _collect_known_usernames(conn, where_sql: str) -> tuple[set, dict, dict]:
     from sqlalchemy import text as sqlt
     _SAFE = re.compile(r'^[a-zA-Z0-9_\-\.]+$')
 
+    # Try scan_uid_summary first (new scans)
     rows = conn.execute(sqlt(
-        f"SELECT uid, MAX(username) FROM files WHERE {where_sql} GROUP BY uid"
-    )).fetchall()
+        "SELECT uid, MAX(username) FROM scan_uid_summary WHERE mount_id=:m AND scan_id=:s GROUP BY uid"
+    ), {"m": mount_id, "s": scan_id}).fetchall()
+
+    if not rows:
+        # Fallback to files table (old scans)
+        rows = conn.execute(sqlt(
+            "SELECT uid, MAX(username) FROM files WHERE mount_id=:m AND scan_id=:s GROUP BY uid"
+        ), {"m": mount_id, "s": scan_id}).fetchall()
 
     known: set[str] = set()
     uid_to_name: dict = {}
@@ -463,36 +477,69 @@ def _build_user_agg_per_mount(conn, mount_triples: list, known_usernames: set, u
                         matched_depth2_prefixes.append(f"{parent_path}/{comp2}")
 
         # ── Step 2: uid attribution for files not under any matched dir ───────
-        if matched_depth1_comps or matched_depth2_prefixes:
-            extra_conds = []
-            if matched_depth1_comps:
-                not_in = ",".join(f"'{c}'" for c in matched_depth1_comps)
-                extra_conds.append(f"({first_comp_sql}) NOT IN ({not_in})")
-            for prefix in matched_depth2_prefixes:
-                safe = prefix.replace("'", "''")
-                extra_conds.append(f"path NOT LIKE '{safe}/%'")
-            uid_rows = conn.execute(sqlt(f"""
-                SELECT uid, SUM(size_bytes) AS ts, COUNT(*) AS fc
-                FROM files
-                WHERE mount_id={mount_id} AND scan_id={scan_id}
-                AND {" AND ".join(extra_conds)}
-                GROUP BY uid
-            """)).fetchall()
-        else:
-            uid_rows = conn.execute(sqlt(f"""
-                SELECT uid, SUM(size_bytes) AS ts, COUNT(*) AS fc
-                FROM files WHERE mount_id={mount_id} AND scan_id={scan_id}
-                GROUP BY uid
-            """)).fetchall()
+        # Use scan_uid_summary for new scans; fall back to files for old scans.
+        has_uid_summary = conn.execute(sqlt(
+            "SELECT 1 FROM scan_uid_summary WHERE scan_id=:s AND mount_id=:m LIMIT 1"
+        ), {"s": scan_id, "m": mount_id}).fetchone() is not None
 
-        for uid, ts, fc in uid_rows:
-            ts = ts or 0
-            fc = fc or 0
-            name = uid_to_name.get(uid, f"uid:{uid}" if uid is not None else "unknown")
-            agg[name]["file_count"] += fc
-            agg[name]["total_size_bytes"] += ts
-            if uid is not None and name in known_usernames:
-                agg[name]["uids"].add(str(uid))
+        if has_uid_summary:
+            uid_sql_parts = [f"scan_id={scan_id}", f"mount_id={mount_id}"]
+            if matched_depth1_comps:
+                not_in = ",".join(f"'{c.replace(chr(39), chr(39)*2)}'" for c in matched_depth1_comps)
+                uid_sql_parts.append(f"top_dir NOT IN ({not_in})")
+            for prefix in matched_depth2_prefixes:
+                # prefix = "/mnt/.../top_dir/sub_dir" — extract depth-1 and depth-2 components
+                after = prefix[len(mount_root):].lstrip('/')
+                pparts = after.split('/', 1)
+                td = pparts[0].replace("'", "''")
+                sd = (pparts[1].split('/')[0] if len(pparts) > 1 else "").replace("'", "''")
+                uid_sql_parts.append(f"NOT (top_dir='{td}' AND sub_dir='{sd}')")
+            uid_rows = conn.execute(sqlt(
+                f"SELECT uid, username, SUM(file_count) AS fc, SUM(total_bytes) AS ts "
+                f"FROM scan_uid_summary WHERE {' AND '.join(uid_sql_parts)} GROUP BY uid, username"
+            )).fetchall()
+            for uid, uname, fc, ts in uid_rows:
+                ts = ts or 0
+                fc = fc or 0
+                if uname:
+                    name = name_to_canonical.get(uname, uname) if name_to_canonical else uname
+                else:
+                    name = uid_to_name.get(uid, f"uid:{uid}" if uid is not None else "unknown")
+                agg[name]["file_count"] += fc
+                agg[name]["total_size_bytes"] += ts
+                if uid is not None and name in known_usernames:
+                    agg[name]["uids"].add(str(uid))
+        else:
+            # Old scans: fall back to files table
+            if matched_depth1_comps or matched_depth2_prefixes:
+                extra_conds = []
+                if matched_depth1_comps:
+                    not_in = ",".join(f"'{c}'" for c in matched_depth1_comps)
+                    extra_conds.append(f"({first_comp_sql}) NOT IN ({not_in})")
+                for prefix in matched_depth2_prefixes:
+                    safe = prefix.replace("'", "''")
+                    extra_conds.append(f"path NOT LIKE '{safe}/%'")
+                uid_rows = conn.execute(sqlt(f"""
+                    SELECT uid, SUM(size_bytes) AS ts, COUNT(*) AS fc
+                    FROM files
+                    WHERE mount_id={mount_id} AND scan_id={scan_id}
+                    AND {" AND ".join(extra_conds)}
+                    GROUP BY uid
+                """)).fetchall()
+            else:
+                uid_rows = conn.execute(sqlt(f"""
+                    SELECT uid, SUM(size_bytes) AS ts, COUNT(*) AS fc
+                    FROM files WHERE mount_id={mount_id} AND scan_id={scan_id}
+                    GROUP BY uid
+                """)).fetchall()
+            for uid, ts, fc in uid_rows:
+                ts = ts or 0
+                fc = fc or 0
+                name = uid_to_name.get(uid, f"uid:{uid}" if uid is not None else "unknown")
+                agg[name]["file_count"] += fc
+                agg[name]["total_size_bytes"] += ts
+                if uid is not None and name in known_usernames:
+                    agg[name]["uids"].add(str(uid))
 
     return agg
 
@@ -512,7 +559,6 @@ def get_user_summary(
     mount = db.query(MountModel).filter(MountModel.id == mount_id).first()
     mount_point = mount.mount_point if mount else ""
 
-    where_sql = f"mount_id = {mount_id} AND scan_id = {scan_id}"
     with db.bind.connect() as conn:
         shash = _settings_hash(conn)
         cached = _cache_lookup(conn, mount_id, scan_id, shash)
@@ -520,7 +566,7 @@ def get_user_summary(
             return cached[:limit]
 
         path_attr = get_path_attribution_enabled(conn)
-        known_usernames, uid_to_canonical, name_to_canonical = _collect_known_usernames(conn, where_sql)
+        known_usernames, uid_to_canonical, name_to_canonical = _collect_known_usernames(conn, mount_id, scan_id)
         agg = _build_user_agg_per_mount(conn, [(mount_id, scan_id, mount_point)], known_usernames, uid_to_canonical,
                                         path_attribution=path_attr, name_to_canonical=name_to_canonical)
 

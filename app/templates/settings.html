@@ -13,6 +13,7 @@
     <button class="settings-nav-item" data-section="scan" onclick="showSection('scan')">Scan</button>
     {% if can_admin %}
     <button class="settings-nav-item" data-section="cache" onclick="showSection('cache')">Cache</button>
+    <button class="settings-nav-item" data-section="database" onclick="showSection('database')">Database</button>
     {% endif %}
     <div class="settings-nav-sep"></div>
     <div class="settings-nav-group-label">Users</div>
@@ -112,6 +113,40 @@
             <button class="btn btn-sm" onclick="rebuildCache()"><svg class="icon"><use href="#i-refresh"/></svg> Rebuild</button>
             <button class="btn btn-danger btn-sm" onclick="clearCache()">Clear</button>
             <span id="cache-msg" class="setting-msg-inline"></span>
+          </div>
+        </div>
+      </div>
+    </div>
+    {% endif %}
+
+    <!-- Database maintenance (admin only) -->
+    {% if can_admin %}
+    <div class="settings-section" id="database">
+      <div class="card">
+        <div class="settings-sec-head">
+          <h2>Database</h2>
+        </div>
+        <p class="settings-desc">
+          Each scan stores a full file index. Over time, old scan records accumulate and can grow
+          to hundreds of GB. Purging keeps only the latest completed scan per mount (metadata is
+          always preserved). After purging, run <code>PRAGMA VACUUM</code> via the SQLite CLI to
+          shrink the file on disk.
+        </p>
+        <div class="setting-row">
+          <div>
+            <div class="setting-label">Database size</div>
+            <div class="setting-hint" id="db-size-hint">Loading…</div>
+          </div>
+          <button class="btn btn-sm" onclick="loadDbStats()"><svg class="icon"><use href="#i-refresh"/></svg> Refresh</button>
+        </div>
+        <div class="setting-row" style="margin-top:.5rem;">
+          <div>
+            <div class="setting-label">Purge old scan data</div>
+            <div class="setting-hint">Delete file records from all but the latest completed scan per mount. Runs in background.</div>
+          </div>
+          <div class="setting-ctrl">
+            <button class="btn btn-danger btn-sm" id="purge-btn" onclick="purgeOldData()">Purge</button>
+            <span id="purge-msg" class="setting-msg-inline"></span>
           </div>
         </div>
       </div>
@@ -402,6 +437,7 @@ function showSection(id) {
   document.querySelectorAll('.settings-section').forEach(s => s.classList.toggle('active', s.id === id));
   document.querySelectorAll('.settings-nav-item').forEach(el => el.classList.toggle('active', el.dataset.section === id));
   history.replaceState(null, '', '#' + id);
+  if (id === 'database') loadDbStats();
 }
 (function() {
   const hash = location.hash.slice(1);
@@ -670,5 +706,43 @@ async function rebuildCache() {
 function esc(s) {
   return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 }
+
+function fmtBytes(n) {
+  if (!n) return '0 B';
+  const u = ['B','KB','MB','GB','TB','PB']; let i = 0;
+  while (n >= 1024 && i < u.length - 1) { n /= 1024; i++; }
+  return n.toFixed(1) + ' ' + u[i];
+}
+
+async function loadDbStats() {
+  const hint = document.getElementById('db-size-hint');
+  if (!hint) return;
+  hint.textContent = 'Loading…';
+  try {
+    const r = await fetch('/api/settings/db-stats');
+    const j = await r.json();
+    if (j.ok) {
+      const { db_bytes, wal_bytes } = j.data;
+      hint.textContent = `DB: ${fmtBytes(db_bytes)}${wal_bytes > 0 ? ' · WAL: ' + fmtBytes(wal_bytes) : ''}`;
+    } else { hint.textContent = 'Error loading stats'; }
+  } catch(e) { hint.textContent = 'Error: ' + e.message; }
+}
+
+async function purgeOldData() {
+  const msg = document.getElementById('purge-msg');
+  const btn = document.getElementById('purge-btn');
+  if (!confirm('Delete file records from all but the latest completed scan per mount?\n\nScan metadata (dates, file counts) is preserved.')) return;
+  btn.disabled = true; msg.textContent = 'Running…'; msg.style.color = 'var(--text-dim)';
+  try {
+    const r = await fetch('/api/settings/purge-scan-data', {method:'POST'});
+    const j = await r.json();
+    if (j.ok) {
+      msg.style.color = 'var(--green)';
+      msg.textContent = `✓ Purging ${j.data.mount_count} mount(s) in background. Refresh size in a few minutes.`;
+    } else { msg.style.color = 'var(--danger)'; msg.textContent = '✗ '+(j.error||'failed'); }
+  } catch(e) { msg.style.color = 'var(--danger)'; msg.textContent = '✗ '+e.message; }
+  btn.disabled = false;
+}
+
 </script>
 {% endblock %}

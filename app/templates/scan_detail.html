@@ -9,13 +9,17 @@
   </div>
   <div style="display:flex;align-items:center;gap:.75rem;">
     <span id="status-badge" class="badge badge-{{ scan.status }} badge-lg">{{ scan.status }}</span>
-    {% if scan.status == "running" and (not auth_enabled or is_admin) %}
+    {% if scan.status in ("running", "queued") and (not auth_enabled or is_admin) %}
     <button id="stop-btn" class="btn btn-danger" onclick="stopScan()"><svg class="icon"><use href="#i-stop"/></svg> Stop</button>
     {% endif %}
   </div>
 </div>
 
-{% if scan.status == "running" %}
+{% if scan.status == "queued" %}
+<div class="info-banner" id="progress-banner">
+  <svg class="icon"><use href="#i-refresh"/></svg> 排队等待中，等待其他扫描完成后启动…
+</div>
+{% elif scan.status == "running" %}
 <div class="info-banner" id="progress-banner">
   <svg class="icon" style="animation:spin 1.2s linear infinite;"><use href="#i-refresh"/></svg> 扫描进行中…
   <span id="progress-files" style="margin-left:1rem;font-weight:600;"></span>
@@ -67,7 +71,7 @@
 
 <script>
 const scanId = {{ scan.id }};
-const STARTED_AT_MS = {{ (scan.started_at.timestamp() * 1000) | int }};
+const STARTED_AT_MS = {{ (scan.started_at.timestamp() * 1000) | int if scan.started_at else 0 }};
 let status = '{{ scan.status }}';
 let durationTimer = null;
 
@@ -80,14 +84,24 @@ function fmtB(n) {
 }
 
 function updateLiveDuration() {
+  const startMs = durationTimer ? durationTimer._startMs : STARTED_AT_MS;
   const el = document.getElementById('val-duration');
-  if (el) el.textContent = ((Date.now() - STARTED_AT_MS) / 1000).toFixed(0) + 's';
+  if (el && startMs) el.textContent = ((Date.now() - startMs) / 1000).toFixed(0) + 's';
+}
+
+function _startDurationTimer(startMs) {
+  if (durationTimer) clearInterval(durationTimer);
+  const tid = setInterval(updateLiveDuration, 1000);
+  tid._startMs = startMs || STARTED_AT_MS;
+  durationTimer = tid;
+  updateLiveDuration();
 }
 
 if (status === 'running') {
-  durationTimer = setInterval(updateLiveDuration, 1000);
-  updateLiveDuration();
+  _startDurationTimer(STARTED_AT_MS);
+}
 
+if (status === 'running' || status === 'queued') {
   async function poll() {
     try {
       const r = await fetch('/api/scans/' + scanId);
@@ -95,19 +109,45 @@ if (status === 'running') {
       if (!j.ok) return;
       const d = j.data;
 
-      document.getElementById('val-files').textContent = d.total_files.toLocaleString();
-      document.getElementById('val-dirs').textContent = d.total_dirs.toLocaleString();
-      document.getElementById('val-size').textContent = fmtB(d.total_bytes);
-      document.getElementById('val-errors').textContent = d.error_count;
-      document.getElementById('progress-files').textContent =
-        d.total_files.toLocaleString() + ' files · ' + fmtB(d.total_bytes);
-      const targetEl = document.getElementById('val-target');
-      if (targetEl && d.target_path) targetEl.textContent = d.target_path;
-      const cmEl = document.getElementById('current-mount');
-      if (cmEl && d.target_path) cmEl.textContent = '→ ' + d.target_path;
+      // Transition: queued → running
+      if (status === 'queued' && d.status === 'running') {
+        status = 'running';
+        const startMs = d.started_at ? new Date(d.started_at).getTime() : Date.now();
+        _startDurationTimer(startMs);
+        const badge = document.getElementById('status-badge');
+        badge.textContent = 'running';
+        badge.className = 'badge badge-running badge-lg';
+        const banner = document.getElementById('progress-banner');
+        if (banner) {
+          banner.innerHTML = '<svg class="icon" style="animation:spin 1.2s linear infinite;"><use href="#i-refresh"/></svg> 扫描进行中… <span id="progress-files" style="margin-left:1rem;font-weight:600;"></span>';
+        }
+        {% if (not auth_enabled) or is_admin %}
+        const stopArea = document.querySelector('.page-header > div:last-child');
+        if (stopArea && !document.getElementById('stop-btn')) {
+          const btn = document.createElement('button');
+          btn.id = 'stop-btn'; btn.className = 'btn btn-danger';
+          btn.innerHTML = '<svg class="icon"><use href="#i-stop"/></svg> Stop';
+          btn.onclick = stopScan;
+          stopArea.appendChild(btn);
+        }
+        {% endif %}
+      }
 
-      if (d.status !== 'running') {
-        clearInterval(durationTimer); durationTimer = null;
+      if (d.status === 'running') {
+        document.getElementById('val-files').textContent = d.total_files.toLocaleString();
+        document.getElementById('val-dirs').textContent = d.total_dirs.toLocaleString();
+        document.getElementById('val-size').textContent = fmtB(d.total_bytes);
+        document.getElementById('val-errors').textContent = d.error_count;
+        const pfEl = document.getElementById('progress-files');
+        if (pfEl) pfEl.textContent = d.total_files.toLocaleString() + ' files · ' + fmtB(d.total_bytes);
+        const targetEl = document.getElementById('val-target');
+        if (targetEl && d.target_path) targetEl.textContent = d.target_path;
+        const cmEl = document.getElementById('current-mount');
+        if (cmEl && d.target_path) cmEl.textContent = '→ ' + d.target_path;
+      }
+
+      if (d.status !== 'running' && d.status !== 'queued') {
+        if (durationTimer) { clearInterval(durationTimer); durationTimer = null; }
         status = d.status;
         const badge = document.getElementById('status-badge');
         badge.textContent = d.status;
@@ -123,15 +163,19 @@ if (status === 'running') {
           document.getElementById('val-duration').textContent =
             d.duration_seconds.toFixed(2) + 's';
         }
+        document.getElementById('val-files').textContent = (d.total_files || 0).toLocaleString();
+        document.getElementById('val-dirs').textContent = (d.total_dirs || 0).toLocaleString();
+        document.getElementById('val-size').textContent = fmtB(d.total_bytes);
+        document.getElementById('val-errors').textContent = d.error_count || 0;
 
         const banner = document.getElementById('progress-banner');
         if (banner) {
           if (d.status === 'completed') {
             banner.className = 'success-banner';
-            banner.textContent = '✓ 扫描完成 — ' + d.total_files.toLocaleString() + ' 个文件，' + fmtB(d.total_bytes);
+            banner.textContent = '✓ 扫描完成 — ' + (d.total_files || 0).toLocaleString() + ' 个文件，' + fmtB(d.total_bytes);
           } else if (d.status === 'stopped') {
             banner.className = 'info-banner';
-            banner.textContent = '■ 扫描已停止 — ' + d.total_files.toLocaleString() + ' 个文件';
+            banner.textContent = '■ 扫描已停止 — ' + (d.total_files || 0).toLocaleString() + ' 个文件';
           } else {
             banner.className = 'error-banner';
             banner.textContent = '✗ 扫描失败';

@@ -25,10 +25,15 @@ def _cleanup_orphaned_scans():
     from app.models import Scan
     db = SessionLocal()
     try:
-        orphans = db.query(Scan).filter(Scan.status == "running").all()
+        orphans = db.query(Scan).filter(Scan.status.in_(["running", "queued"])).all()
         if not orphans:
             return
         for scan in orphans:
+            if scan.status == "queued":
+                scan.status = "interrupted"
+                scan.finished_at = datetime.now()
+                logger.warning("Marked queued scan %d as interrupted on startup", scan.id)
+                continue
             if scan.worker_pid:
                 try:
                     os.kill(scan.worker_pid, 0)

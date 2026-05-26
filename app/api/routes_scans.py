@@ -33,7 +33,10 @@ def list_scans(
 ):
     q = db.query(Scan)
     if status:
-        q = q.filter(Scan.status == status)
+        if status == "active":
+            q = q.filter(Scan.status.in_(["running", "queued"]))
+        else:
+            q = q.filter(Scan.status == status)
     if mount_id is not None:
         q = q.filter(Scan.mount_id == mount_id)
     total = q.count()
@@ -73,8 +76,8 @@ def delete_scan(scan_id: int, request: Request, db: Session = Depends(get_db),
     s = db.query(Scan).get(scan_id)
     if not s:
         raise HTTPException(status_code=404, detail="Scan not found")
-    if s.status == "running":
-        raise HTTPException(status_code=409, detail="Cannot delete a running scan")
+    if s.status in ("running", "queued"):
+        raise HTTPException(status_code=409, detail="Cannot delete an active scan")
     with db.bind.connect() as conn:
         conn.execute(text("DELETE FROM files WHERE scan_id = :sid"), {"sid": scan_id})
         conn.execute(text("DELETE FROM directories WHERE scan_id = :sid"), {"sid": scan_id})
@@ -90,11 +93,16 @@ def stop_scan(scan_id: int, request: Request, db: Session = Depends(get_db),
     s = db.query(Scan).get(scan_id)
     if not s:
         raise HTTPException(status_code=404, detail="Scan not found")
-    if s.status != "running":
+    if s.status not in ("running", "queued"):
         raise HTTPException(status_code=409, detail="Scan is not running")
 
-    # Set DB flag so the worker subprocess can detect stop via polling
+    # Set DB flag; queued scans check this before starting
     s.stop_requested = True
+    if s.status == "queued":
+        s.status = "stopped"
+        s.finished_at = datetime.now()
+        db.commit()
+        return ok({"stopping": scan_id})
     db.commit()
 
     proc = _active_procs.get(scan_id)
@@ -184,17 +192,56 @@ def _mark_stopped(scan_id: int) -> None:
         db.close()
 
 
-def _wal_checkpoint() -> None:
-    """Passive WAL checkpoint: flush as many WAL pages as possible without blocking readers.
-    Called after each scan completes to prevent unbounded WAL growth."""
+def _wal_checkpoint(mode: str = "TRUNCATE") -> None:
+    """WAL checkpoint. TRUNCATE zeros the WAL file if all frames are flushed (best effort).
+    Falls back to PASSIVE behaviour when active readers prevent exclusive access."""
     db = SessionLocal()
     try:
         from sqlalchemy import text
         with db.bind.connect() as conn:
-            conn.execute(text("PRAGMA wal_checkpoint(PASSIVE)"))
-        logger.info("WAL checkpoint completed after scan")
+            conn.execute(text(f"PRAGMA wal_checkpoint({mode})"))
+        logger.info("WAL checkpoint (%s) completed", mode)
     except Exception as e:
         logger.warning("WAL checkpoint failed: %s", e)
+    finally:
+        db.close()
+
+
+def _purge_old_scan_files(scan_id: int) -> None:
+    """Delete files/directories/errors/attribution-cache for all previous completed scans
+    of the same mount. Keeps the Scan metadata rows (for history). No-op for path scans
+    (no mount_id) or if there are no older scans."""
+    from sqlalchemy import text
+    db = SessionLocal()
+    try:
+        with db.bind.connect() as conn:
+            row = conn.execute(
+                text("SELECT mount_id FROM scans WHERE id = :sid"), {"sid": scan_id}
+            ).fetchone()
+            if not row or not row[0]:
+                return
+            mount_id = row[0]
+
+            old_rows = conn.execute(
+                text("SELECT id FROM scans WHERE mount_id=:mid AND id!=:sid AND status='completed'"),
+                {"mid": mount_id, "sid": scan_id},
+            ).fetchall()
+            if not old_rows:
+                return
+
+            id_list = ",".join(str(r[0]) for r in old_rows)
+            conn.execute(text(f"DELETE FROM files WHERE scan_id IN ({id_list})"))
+            conn.execute(text(f"DELETE FROM directories WHERE scan_id IN ({id_list})"))
+            conn.execute(text(f"DELETE FROM scan_errors WHERE scan_id IN ({id_list})"))
+            conn.execute(text(f"DELETE FROM user_attribution_cache WHERE scan_id IN ({id_list})"))
+            conn.execute(text(f"DELETE FROM scan_ext_summary WHERE scan_id IN ({id_list})"))
+            conn.execute(text(f"DELETE FROM scan_uid_summary WHERE scan_id IN ({id_list})"))
+            conn.commit()
+
+        logger.info("Purged file records for %d old scans of mount %d (kept scan %d)",
+                    len(old_rows), mount_id, scan_id)
+    except Exception as e:
+        logger.warning("Purge old scan files failed for scan %d: %s", scan_id, e)
     finally:
         db.close()
 
@@ -205,9 +252,9 @@ def delete_scans_batch(ids: list[int], request: Request, db: Session = Depends(g
     from sqlalchemy import text
     if not ids:
         raise HTTPException(status_code=400, detail="No scan ids provided")
-    running = db.query(Scan.id).filter(Scan.id.in_(ids), Scan.status == "running").all()
+    running = db.query(Scan.id).filter(Scan.id.in_(ids), Scan.status.in_(["running", "queued"])).all()
     if running:
-        raise HTTPException(status_code=409, detail=f"Cannot delete running scans: {[r[0] for r in running]}")
+        raise HTTPException(status_code=409, detail=f"Cannot delete active scans: {[r[0] for r in running]}")
     # Delete scan records immediately so they don't reappear on page refresh.
     # Large associated data (files, dirs, errors) is cleaned up in the background.
     id_list = ",".join(str(i) for i in ids)
@@ -227,6 +274,8 @@ def _delete_scans_background(ids: list[int]) -> None:
             conn.execute(text(f"DELETE FROM files WHERE scan_id IN ({id_list})"))
             conn.execute(text(f"DELETE FROM directories WHERE scan_id IN ({id_list})"))
             conn.execute(text(f"DELETE FROM scan_errors WHERE scan_id IN ({id_list})"))
+            conn.execute(text(f"DELETE FROM scan_ext_summary WHERE scan_id IN ({id_list})"))
+            conn.execute(text(f"DELETE FROM scan_uid_summary WHERE scan_id IN ({id_list})"))
             conn.commit()
         logger.info("Background data cleanup for scans %s complete", ids)
     except Exception as e:
@@ -326,7 +375,7 @@ def _create_parallel_scan(req: ScanCreateRequest, db):
         scan = Scan(
             mount_id=mount.id,
             started_at=datetime.now(),
-            status="running",
+            status="queued",
             scan_mode="single_mount",
             target_path=mount.mount_point,
             filesystem_boundary_only=req.filesystem_boundary_only,
@@ -362,15 +411,17 @@ def _create_parallel_scan(req: ScanCreateRequest, db):
 
 
 def _launch_parallel_mounts(scan_infos: list[tuple[int, str]], max_parallel: int) -> None:
-    """Launch scan subprocesses with max_parallel concurrency (semaphore-controlled)."""
+    """Launch scan subprocesses with max_parallel concurrency (semaphore-controlled).
+    After ALL scans finish, purge old file records and do a TRUNCATE WAL checkpoint."""
     sem = threading.Semaphore(max_parallel)
+    _completed_ids: list[int] = []
+    _remaining = [len(scan_infos)]
+    _counter_lock = threading.Lock()
 
     def run_one(scan_id: int, req_b64: str) -> None:
         sem.acquire()
         try:
             actual_start = datetime.now()
-            # Update started_at to actual subprocess start time (not queue creation time).
-            # This must happen BEFORE Popen so the worker reads the correct value.
             db_pre = SessionLocal()
             try:
                 s = db_pre.get(Scan, scan_id)
@@ -380,6 +431,7 @@ def _launch_parallel_mounts(scan_infos: list[tuple[int, str]], max_parallel: int
                     db_pre.commit()
                     return
                 if s:
+                    s.status = "running"
                     s.started_at = actual_start
                     db_pre.commit()
             finally:
@@ -407,12 +459,23 @@ def _launch_parallel_mounts(scan_infos: list[tuple[int, str]], max_parallel: int
             if proc.returncode == 0:
                 from app.api.routes_mounts import invalidate_overview_cache
                 invalidate_overview_cache()
-                threading.Thread(target=_wal_checkpoint, daemon=True,
-                                 name=f"wal-ckpt-{scan_id}").start()
+                with _counter_lock:
+                    _completed_ids.append(scan_id)
             elif proc.returncode is not None and proc.returncode < 0:
                 _mark_stopped(scan_id)
         finally:
             sem.release()
+            with _counter_lock:
+                _remaining[0] -= 1
+                if _remaining[0] == 0:
+                    # All scans done — purge old data then truncate WAL
+                    completed = list(_completed_ids)
+                    def _batch_cleanup():
+                        for sid in completed:
+                            _purge_old_scan_files(sid)
+                        _wal_checkpoint("TRUNCATE")
+                    threading.Thread(target=_batch_cleanup, daemon=True,
+                                     name="batch-cleanup").start()
 
     for scan_id, req_b64 in scan_infos:
         threading.Thread(target=run_one, args=(scan_id, req_b64), daemon=True,
@@ -429,7 +492,10 @@ def _monitor_proc(scan_id: int, proc: subprocess.Popen) -> None:
     if rc == 0:
         from app.api.routes_mounts import invalidate_overview_cache
         invalidate_overview_cache()
-        threading.Thread(target=_wal_checkpoint, daemon=True, name=f"wal-ckpt-{scan_id}").start()
+        def _single_cleanup():
+            _purge_old_scan_files(scan_id)
+            _wal_checkpoint("TRUNCATE")
+        threading.Thread(target=_single_cleanup, daemon=True, name=f"cleanup-{scan_id}").start()
     elif rc is not None and rc < 0:
         # Killed by signal (e.g. SIGKILL from stop endpoint or OOM)
         db = SessionLocal()

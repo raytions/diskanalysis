@@ -308,6 +308,48 @@ def sync_users_from_scans(request: Request, db: Session = Depends(get_db), _=Dep
     return ok({"candidates": len(names), "added": added})
 
 
+# ── Database maintenance ──────────────────────────────────────────────────────
+
+@router.get("/db-stats")
+def get_db_stats(db: Session = Depends(get_db)):
+    """Return DB and WAL file sizes (fast — no table scans)."""
+    import os
+    from app.config import settings as cfg
+    db_path = cfg.DB_PATH
+    db_size = os.path.getsize(db_path) if os.path.exists(db_path) else 0
+    wal_size = os.path.getsize(db_path + "-wal") if os.path.exists(db_path + "-wal") else 0
+    return ok({"db_bytes": db_size, "wal_bytes": wal_size})
+
+
+@router.post("/purge-scan-data")
+def purge_scan_data(request: Request, db: Session = Depends(get_db),
+                    _=Depends(auth.require_admin)):
+    """For every mount, keep only the latest completed scan's file records.
+    Deletes files, directories, scan_errors, attribution cache for all older scans.
+    Scan metadata rows are preserved. Runs in background."""
+    import threading
+    from app.api.routes_scans import _purge_old_scan_files, _wal_checkpoint
+
+    with db.bind.connect() as conn:
+        # Find the latest completed scan per mount
+        rows = conn.execute(text("""
+            SELECT mount_id, MAX(id) as latest_id
+            FROM scans
+            WHERE mount_id IS NOT NULL AND status = 'completed'
+            GROUP BY mount_id
+        """)).fetchall()
+
+    scan_ids = [r[1] for r in rows]
+
+    def _run():
+        for sid in scan_ids:
+            _purge_old_scan_files(sid)
+        _wal_checkpoint("TRUNCATE")
+
+    threading.Thread(target=_run, daemon=True, name="manual-purge").start()
+    return ok({"purging": True, "mount_count": len(scan_ids)})
+
+
 # ── Attribution cache management ──────────────────────────────────────────────
 
 @router.delete("/user-cache")

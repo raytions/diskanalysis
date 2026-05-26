@@ -131,3 +131,39 @@ class ScanError(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
 
     scan: Mapped["Scan"] = relationship("Scan", back_populates="errors")
+
+
+class ScanExtSummary(Base):
+    """Pre-computed per-extension aggregates for a scan. Replaces GROUP BY on files table."""
+    __tablename__ = "scan_ext_summary"
+    __table_args__ = (
+        Index("ix_scan_ext_scan_bytes", "scan_id", "total_bytes"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    scan_id: Mapped[int] = mapped_column(Integer, ForeignKey("scans.id"), index=True)
+    mount_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("mounts.id"), nullable=True, index=True)
+    extension: Mapped[str | None] = mapped_column(String, nullable=True)
+    file_count: Mapped[int] = mapped_column(Integer, default=0)
+    total_bytes: Mapped[int] = mapped_column(BigInteger, default=0)
+    cold_count: Mapped[int] = mapped_column(Integer, default=0)
+    cold_bytes: Mapped[int] = mapped_column(BigInteger, default=0)
+
+
+class ScanUidSummary(Base):
+    """Pre-computed uid/directory aggregates. Replaces Phase 2 files table scan for attribution."""
+    __tablename__ = "scan_uid_summary"
+    __table_args__ = (
+        Index("ix_scan_uid_scan_uid", "scan_id", "uid"),
+        Index("ix_scan_uid_topdir", "scan_id", "mount_id", "top_dir"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    scan_id: Mapped[int] = mapped_column(Integer, ForeignKey("scans.id"), index=True)
+    mount_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("mounts.id"), nullable=True, index=True)
+    top_dir: Mapped[str] = mapped_column(String, default="")
+    sub_dir: Mapped[str] = mapped_column(String, default="")
+    uid: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    username: Mapped[str | None] = mapped_column(String, nullable=True)
+    file_count: Mapped[int] = mapped_column(Integer, default=0)
+    total_bytes: Mapped[int] = mapped_column(BigInteger, default=0)

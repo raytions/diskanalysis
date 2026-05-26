@@ -119,13 +119,11 @@
         <td><a href="/scans/{{ s.id }}" onclick="event.stopPropagation()">#{{ s.id }}</a></td>
         <td title="{{ s.target_path or '' }}"><div class="scan-target-cell dimmed">{{ s.target_path or 'all' }}</div></td>
         <td><span class="badge badge-{{ s.status }}">{{ s.status }}</span></td>
-        <td class="dimmed" style="white-space:nowrap;">{{ s.started_at.strftime('%Y-%m-%d %H:%M') }}</td>
-        {% if s.status == 'running' %}
-          {% if s.worker_pid %}
-          <td class="num elapsed-cell" data-started="{{ s.started_at.isoformat() }}" style="white-space:nowrap;">—</td>
-          {% else %}
-          <td class="num dimmed" style="white-space:nowrap;">Queued</td>
-          {% endif %}
+        <td class="dimmed" style="white-space:nowrap;">{{ s.started_at.strftime('%Y-%m-%d %H:%M') if s.started_at else '—' }}</td>
+        {% if s.status == 'queued' %}
+        <td class="num dimmed" style="white-space:nowrap;">Queued</td>
+        {% elif s.status == 'running' %}
+        <td class="num elapsed-cell" data-started="{{ s.started_at.isoformat() }}" style="white-space:nowrap;">—</td>
         {% else %}
         <td class="num" style="white-space:nowrap;">{{ s.duration_seconds | fmt_duration }}</td>
         {% endif %}
@@ -280,7 +278,7 @@ function showToast(msg) {
   setTimeout(() => { t.style.opacity = '0'; setTimeout(() => t.remove(), 400); }, 3600);
 }
 
-// ── Live update for running scans (no full-page reload) ─────────────────────
+// ── Live update for running/queued scans ────────────────────────────────────
 function fmtDur(s) {
   if (s >= 3600) return (s / 3600).toFixed(1) + 'h';
   if (s >= 60)   return (s / 60).toFixed(1) + 'm';
@@ -302,10 +300,10 @@ function tickElapsed() {
 setInterval(tickElapsed, 1000);
 tickElapsed();
 
-// Collect running scan IDs from the rendered table
-const _runningIds = new Set(
+// Collect active (running or queued) scan IDs from the rendered table
+const _activeIds = new Set(
   [...document.querySelectorAll('#scans-tbody tr[data-id]')]
-    .filter(r => r.querySelector('.badge-running'))
+    .filter(r => r.querySelector('.badge-running, .badge-queued'))
     .map(r => parseInt(r.dataset.id))
 );
 
@@ -322,16 +320,14 @@ function _applyRow(scan) {
     cells[3].textContent = d.toISOString().slice(0, 16).replace('T', ' ');
   }
   const dur = cells[4];
-  if (scan.status === 'running') {
-    if (scan.worker_pid) {
-      dur.className = 'num elapsed-cell';
-      dur.dataset.started = scan.started_at;
-      tickElapsed();
-    } else {
-      dur.className = 'num dimmed';
-      dur.textContent = 'Queued';
-      delete dur.dataset.started;
-    }
+  if (scan.status === 'queued') {
+    dur.className = 'num dimmed';
+    dur.textContent = 'Queued';
+    delete dur.dataset.started;
+  } else if (scan.status === 'running') {
+    dur.className = 'num elapsed-cell';
+    dur.dataset.started = scan.started_at;
+    tickElapsed();
   } else {
     dur.className = 'num';
     dur.textContent = scan.duration_seconds != null ? fmtDur(scan.duration_seconds) : '—';
@@ -344,30 +340,29 @@ function _applyRow(scan) {
   cells[7].className = 'num' + (errs > 0 ? ' warn-text' : '');
 }
 
-async function _pollRunning() {
-  if (_runningIds.size === 0) return;
+async function _pollActive() {
+  if (_activeIds.size === 0) return;
   try {
-    const r = await fetch('/api/scans?status=running&limit=200');
+    const r = await fetch('/api/scans?status=active&limit=200');
     const j = await r.json();
     if (!j.ok) return;
-    const nowRunning = new Set(j.data.items.map(s => s.id));
-    // Update still-running scans
+    const nowActive = new Set(j.data.items.map(s => s.id));
     for (const scan of j.data.items) {
-      if (_runningIds.has(scan.id)) _applyRow(scan);
+      if (_activeIds.has(scan.id)) _applyRow(scan);
     }
     // Scans that just finished — fetch their final state
-    for (const id of [..._runningIds].filter(id => !nowRunning.has(id))) {
+    for (const id of [..._activeIds].filter(id => !nowActive.has(id))) {
       try {
         const r2 = await fetch(`/api/scans/${id}`);
         const j2 = await r2.json();
         if (j2.ok) _applyRow(j2.data);
       } catch(e) {}
-      _runningIds.delete(id);
+      _activeIds.delete(id);
     }
   } catch(e) { /* ignore transient network errors */ }
-  if (_runningIds.size > 0) setTimeout(_pollRunning, 3000);
+  if (_activeIds.size > 0) setTimeout(_pollActive, 3000);
 }
 
-if (_runningIds.size > 0) setTimeout(_pollRunning, 3000);
+if (_activeIds.size > 0) setTimeout(_pollActive, 3000);
 </script>
 {% endblock %}
