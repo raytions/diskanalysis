@@ -7,7 +7,7 @@
   <h1>Scans</h1>
 </div>
 
-<div class="scans-layout">
+<div class="scans-layout{% if not can_admin %} scans-layout-history-only{% endif %}">
 
 {% if can_admin %}
 <section class="card scans-run-panel" style="min-width:0;">

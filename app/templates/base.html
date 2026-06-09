@@ -4,10 +4,14 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>{% block title %}DiskAnalysis{% endblock %}</title>
+  <meta name="description" content="Self-hosted disk analysis panel for Linux and NAS mount points." />
+  <meta name="theme-color" content="#172122" />
   <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link rel="stylesheet" href="/static/style.css" />
 </head>
 <body>
+<a href="#main-content" class="skip-link">Skip to content</a>
 
 <!-- ── SVG icon sprite (hidden, referenced via <use href="#i-…">) ── -->
 <svg xmlns="http://www.w3.org/2000/svg" style="display:none" aria-hidden="true">
@@ -97,7 +101,7 @@
   </div>
 </nav>
 
-<main class="container">
+<main class="container" id="main-content">
   {% block content %}{% endblock %}
 </main>
 
