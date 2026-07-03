@@ -401,12 +401,24 @@ pre {
   width: 100%;
 }
 .footer {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  gap: .75rem;
+  flex-wrap: wrap;
   text-align: center;
   padding: 1.15rem;
   color: var(--text-muted);
   font-size: .8rem;
   border-top: 1px solid var(--border);
   background: color-mix(in srgb, var(--surface) 58%, transparent);
+}
+.footer a {
+  color: var(--accent);
+  text-decoration: none;
+}
+.footer a:hover {
+  text-decoration: underline;
 }
 [data-theme="termix"] .footer {
   background: #0b0c0b;

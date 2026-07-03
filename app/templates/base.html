@@ -1,11 +1,11 @@
 <!DOCTYPE html>
-<html lang="en" data-theme="dark">
+<html lang="en" data-theme="termix">
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>{% block title %}DiskAnalysis{% endblock %}</title>
   <meta name="description" content="Self-hosted disk analysis panel for Linux and NAS mount points." />
-  <meta name="theme-color" content="#172122" id="theme-color-meta" />
+  <meta name="theme-color" content="#151614" id="theme-color-meta" />
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link rel="stylesheet" href="/static/style.css" />
@@ -116,6 +116,7 @@
 
 <footer class="footer">
   <span>DiskAnalysis &mdash; self-hosted disk panel</span>
+  <a href="https://github.com/raytions/diskanalysis" target="_blank" rel="noopener noreferrer">GitHub</a>
 </footer>
 
 <script>
@@ -139,7 +140,7 @@ const THEME_LABELS = {dark: 'Dark', termix: 'Console', light: 'Light'};
 const THEME_COLORS = {dark: '#172122', termix: '#151614', light: '#eef1f4'};
 
 function setTheme(theme) {
-  const next = Object.prototype.hasOwnProperty.call(THEME_LABELS, theme) ? theme : 'dark';
+  const next = Object.prototype.hasOwnProperty.call(THEME_LABELS, theme) ? theme : 'termix';
   document.documentElement.dataset.theme = next;
   localStorage.setItem('theme', next);
 
@@ -160,7 +161,7 @@ function chooseTheme(theme) {
 }
 
 (function() {
-  setTheme(localStorage.getItem('theme') || 'dark');
+  setTheme(localStorage.getItem('theme') || 'termix');
 })();
 
 function fmtBytes(n) {
