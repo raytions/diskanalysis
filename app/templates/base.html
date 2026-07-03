@@ -97,15 +97,16 @@
     <!-- Settings -->
     <a href="/settings" class="nav-icon-btn{% if '/settings' in request.url.path %} page-active{% endif %}" title="Settings"><svg class="icon"><use href="#i-settings"/></svg></a>
     <!-- Theme selector -->
-    <label class="theme-select-wrap" title="Theme">
-      <span class="sr-only">Theme</span>
-      <svg class="icon"><use href="#i-contrast"/></svg>
-      <select id="theme-select" class="theme-select" onchange="setTheme(this.value)" aria-label="Theme">
-        <option value="dark">Dark</option>
-        <option value="termix">Termix</option>
-        <option value="light">Light</option>
-      </select>
-    </label>
+    <div class="nav-dropdown">
+      <button class="nav-icon-btn" id="theme-button" type="button" onclick="toggleNavDD('theme-menu')" title="Theme" aria-haspopup="menu" aria-expanded="false">
+        <svg class="icon"><use href="#i-contrast"/></svg>
+      </button>
+      <div class="nav-dd-menu theme-menu" id="theme-menu" style="display:none;" role="menu">
+        <button type="button" class="nav-dd-item theme-option" data-theme-option="dark" onclick="chooseTheme('dark')" role="menuitem">Dark</button>
+        <button type="button" class="nav-dd-item theme-option" data-theme-option="termix" onclick="chooseTheme('termix')" role="menuitem">Termix</button>
+        <button type="button" class="nav-dd-item theme-option" data-theme-option="light" onclick="chooseTheme('light')" role="menuitem">Light</button>
+      </div>
+    </div>
   </div>
 </nav>
 
@@ -122,11 +123,16 @@ function toggleNavDD(id) {
   const menu = document.getElementById(id);
   const open = menu.style.display !== 'none';
   document.querySelectorAll('.nav-dd-menu').forEach(m => m.style.display = 'none');
+  document.querySelectorAll('[aria-haspopup="menu"]').forEach(b => b.setAttribute('aria-expanded', 'false'));
   if (!open) menu.style.display = 'block';
+  const trigger = id === 'theme-menu' ? document.getElementById('theme-button') : document.querySelector(`[onclick="toggleNavDD('${id}')"]`);
+  if (trigger) trigger.setAttribute('aria-expanded', String(!open));
 }
 document.addEventListener('click', e => {
-  if (!e.target.closest('.nav-dropdown'))
+  if (!e.target.closest('.nav-dropdown')) {
     document.querySelectorAll('.nav-dd-menu').forEach(m => m.style.display = 'none');
+    document.querySelectorAll('[aria-haspopup="menu"]').forEach(b => b.setAttribute('aria-expanded', 'false'));
+  }
 });
 
 const THEME_LABELS = {dark: 'Dark', termix: 'Termix', light: 'Light'};
@@ -137,11 +143,20 @@ function setTheme(theme) {
   document.documentElement.dataset.theme = next;
   localStorage.setItem('theme', next);
 
-  const select = document.getElementById('theme-select');
-  if (select) select.value = next;
+  document.querySelectorAll('[data-theme-option]').forEach(item => {
+    const active = item.dataset.themeOption === next;
+    item.classList.toggle('active', active);
+    item.setAttribute('aria-current', active ? 'true' : 'false');
+  });
 
   const meta = document.getElementById('theme-color-meta');
   if (meta) meta.setAttribute('content', THEME_COLORS[next]);
+}
+
+function chooseTheme(theme) {
+  setTheme(theme);
+  document.querySelectorAll('.nav-dd-menu').forEach(m => m.style.display = 'none');
+  document.querySelectorAll('[aria-haspopup="menu"]').forEach(b => b.setAttribute('aria-expanded', 'false'));
 }
 
 (function() {
