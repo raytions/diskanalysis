@@ -611,10 +611,23 @@ def mount_ssh_fs(req: SSHMountRequest, request: Request, db: Session = Depends(g
                             details={"remote": remote, "fs_type": mounted_fs, "mkdir_command": mkdir_command})
             return ok({"mounted": True, "fs_type": mounted_fs, "command": cmd_display, "mkdir_command": mkdir_command})
         err_msg = (result.stderr or result.stdout or "sshfs exited with error").strip()
+        remote_diag = _diagnose_remote_path(req)
+        cleanup_msg = ""
+        mounted_after_failure = _check_proc_mounts(local)
+        if mounted_after_failure:
+            cleanup_ok, cleanup_msg = _try_unmount(local, lazy=True)
+            cleanup_msg = f"; cleanup: {cleanup_msg if cleanup_ok else 'failed: ' + cleanup_msg}"
+        full_err = f"{err_msg}. Remote check: {remote_diag}{cleanup_msg}"
         log_mount_event(db, mount_point=local, event_type="mount", status="failed",
-                        message=err_msg, command=cmd_display,
-                        details={"remote": remote, "returncode": result.returncode, "mkdir_command": mkdir_command})
-        return ok({"mounted": False, "error": err_msg, "command": cmd_display})
+                        message=full_err, command=cmd_display,
+                        details={
+                            "remote": remote,
+                            "returncode": result.returncode,
+                            "mkdir_command": mkdir_command,
+                            "remote_diagnostic": remote_diag,
+                            "cleanup": cleanup_msg,
+                        })
+        return ok({"mounted": False, "error": full_err, "command": cmd_display})
     except subprocess.TimeoutExpired:
         log_mount_event(db, mount_point=local, event_type="mount", status="failed",
                         message="Connection timed out.", command=cmd_display,
