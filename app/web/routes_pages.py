@@ -134,11 +134,15 @@ def scans_page(request: Request, db: Session = Depends(get_db)):
     scans = db.query(Scan).order_by(Scan.started_at.desc()).limit(100).all()
     mounts = db.query(Mount).filter(Mount.is_accessible == True).order_by(Mount.mount_point).all()
     mounted_paths = _get_mounted_paths()
+    from app.api.routes_settings import get_scan_schedule
+    with db.bind.connect() as conn:
+        scan_schedule = get_scan_schedule(conn)
     return _tr(request, "scans.html", {
         "scans": scans,
         "mounts": mounts,
         "mounted_paths": mounted_paths,
         "default_cold_days": settings.DEFAULT_COLD_DAYS,
+        "scan_schedule": scan_schedule,
     })
 
 
@@ -156,12 +160,11 @@ def scan_detail_page(request: Request, scan_id: int, db: Session = Depends(get_d
 def settings_page(request: Request, db: Session = Depends(get_db)):
     from sqlalchemy import text
     from app.services.analytics import get_path_attribution_enabled
-    from app.api.routes_settings import get_max_parallel_scans, get_scan_schedule, get_sudo_mode_enabled
+    from app.api.routes_settings import get_max_parallel_scans, get_sudo_mode_enabled
     with db.bind.connect() as conn:
         path_attr = get_path_attribution_enabled(conn)
         max_parallel_scans = get_max_parallel_scans(conn)
         sudo_mode_enabled = get_sudo_mode_enabled(conn)
-        scan_schedule = get_scan_schedule(conn)
         users = conn.execute(text(
             "SELECT username, aliases, created_at FROM custom_users ORDER BY username"
         )).fetchall()
@@ -172,8 +175,6 @@ def settings_page(request: Request, db: Session = Depends(get_db)):
         "path_user_attribution": path_attr,
         "max_parallel_scans": max_parallel_scans,
         "sudo_mode_enabled": sudo_mode_enabled,
-        "scan_schedule": scan_schedule,
-        "mounts": db.query(Mount).order_by(Mount.mount_point).all(),
         "users": [{"username": r[0],
                    "aliases": [a.strip() for a in (r[1] or "").split(",") if a.strip()],
                    "created_at": r[2]} for r in users],

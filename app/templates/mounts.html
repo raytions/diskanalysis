@@ -194,6 +194,43 @@
   {% endif %}
 </form>
 
+{% if not auth_enabled or is_admin %}
+<section id="historic-remount-panel" class="card" style="display:none;margin-bottom:1.25rem;">
+  <div style="display:flex;align-items:center;justify-content:space-between;gap:1rem;margin-bottom:.85rem;flex-wrap:wrap;">
+    <h2 style="margin:0;">Remount SSHFS</h2>
+    <button type="button" class="btn btn-sm" onclick="closeHistoricRemount()">Close</button>
+  </div>
+  <div class="mount-form-grid" style="margin-bottom:.75rem;">
+    <div class="mount-form-field">
+      <label>Remote</label>
+      <input type="text" id="hist-remount-remote" readonly>
+    </div>
+    <div class="mount-form-field">
+      <label>Local Mount Point</label>
+      <input type="text" id="hist-remount-local" readonly>
+    </div>
+    <div class="mount-form-field">
+      <label>Password <span style="font-weight:400;color:var(--text-dim)">(optional)</span></label>
+      <input type="password" id="hist-remount-pass" placeholder="leave empty for key auth">
+    </div>
+    <div class="mount-form-field">
+      <label>Private Key Path <span style="font-weight:400;color:var(--text-dim)">(optional)</span></label>
+      <input type="text" id="hist-remount-key" placeholder="~/.ssh/id_ed25519">
+    </div>
+    <div class="mount-form-field" style="grid-column:1/-1">
+      <label style="display:flex;align-items:center;gap:.45rem;font-weight:400;color:var(--text-dim);">
+        <input type="checkbox" id="hist-remount-sudo">
+        Use sudo mkdir if the local mount directory is missing
+      </label>
+    </div>
+  </div>
+  <div style="display:flex;gap:.5rem;align-items:center;flex-wrap:wrap;">
+    <button type="button" class="btn btn-primary" id="hist-remount-btn" onclick="submitHistoricRemount()">Mount</button>
+    <span id="hist-remount-msg" class="dimmed" style="font-size:.85rem;"></span>
+  </div>
+</section>
+{% endif %}
+
 {% if mount_events %}
 <section class="card" style="margin-bottom:1.25rem;">
   <div style="display:flex;align-items:center;justify-content:space-between;gap:1rem;margin-bottom:.75rem;flex-wrap:wrap;">
@@ -241,6 +278,7 @@
       <th class="num sortable" data-col="free_bytes" onclick="sortTable(this)">Free</th>
       <th class="sortable" data-col="usage_percent" onclick="sortTable(this)">Usage</th>
       <th>Last Scanned</th>
+      {% if not auth_enabled or is_admin %}<th>Actions</th>{% endif %}
     </tr>
   </thead>
   <tbody id="mounts-tbody">
@@ -277,6 +315,15 @@
         {{ m.usage_percent }}%
       </td>
       <td class="dimmed">{{ m.last_scanned_at.strftime('%Y-%m-%d %H:%M') if m.last_scanned_at else '—' }}</td>
+      {% if not auth_enabled or is_admin %}
+      <td>
+        {% if m.fs_type == 'fuse.sshfs' and m.mount_point not in mounted_paths %}
+        <button type="button" class="btn btn-sm" onclick="openHistoricRemount(event, {{ m.id }}, {{ m.device | tojson }}, {{ m.mount_point | tojson }})">Remount</button>
+        {% else %}
+        <span class="dimmed">—</span>
+        {% endif %}
+      </td>
+      {% endif %}
     </tr>
     {% endfor %}
   </tbody>
@@ -596,6 +643,97 @@ async function addMount() {
 function showAddErr(msg) {
   const el = document.getElementById('add-mount-error');
   el.style.whiteSpace = 'pre-wrap'; el.textContent = msg; el.style.display = 'block';
+}
+
+let _histRemount = null;
+
+function parseSshDevice(device) {
+  const at = device.indexOf('@');
+  if (at <= 0) return null;
+  const username = device.slice(0, at);
+  const rest = device.slice(at + 1);
+  let host = '', remote = '';
+  if (rest.startsWith('[')) {
+    const close = rest.indexOf(']');
+    if (close <= 0 || rest[close + 1] !== ':') return null;
+    host = rest.slice(1, close);
+    remote = rest.slice(close + 2) || '/';
+  } else {
+    const colon = rest.indexOf(':');
+    if (colon <= 0) return null;
+    host = rest.slice(0, colon);
+    remote = rest.slice(colon + 1) || '/';
+  }
+  return { username, host, remote_path: remote };
+}
+
+function openHistoricRemount(event, mountId, device, localPath) {
+  event.preventDefault();
+  event.stopPropagation();
+  const parsed = parseSshDevice(device || '');
+  const panel = document.getElementById('historic-remount-panel');
+  const msg = document.getElementById('hist-remount-msg');
+  if (!parsed) {
+    showToast('Cannot parse SSHFS device: ' + device, 4000);
+    return;
+  }
+  _histRemount = { mountId, localPath, ...parsed };
+  document.getElementById('hist-remount-remote').value = `${parsed.username}@${parsed.host}:${parsed.remote_path}`;
+  document.getElementById('hist-remount-local').value = localPath;
+  document.getElementById('hist-remount-pass').value = '';
+  document.getElementById('hist-remount-key').value = '';
+  document.getElementById('hist-remount-sudo').checked = false;
+  msg.textContent = '';
+  panel.style.display = '';
+  panel.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  document.getElementById('hist-remount-pass').focus();
+}
+
+function closeHistoricRemount() {
+  const panel = document.getElementById('historic-remount-panel');
+  if (panel) panel.style.display = 'none';
+  _histRemount = null;
+}
+
+async function submitHistoricRemount() {
+  if (!_histRemount) return;
+  const btn = document.getElementById('hist-remount-btn');
+  const msg = document.getElementById('hist-remount-msg');
+  btn.disabled = true;
+  msg.style.color = 'var(--text-dim)';
+  msg.textContent = 'Mounting…';
+  try {
+    const r = await fetch('/api/mounts/mount-ssh', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        username: _histRemount.username,
+        host: _histRemount.host,
+        remote_path: _histRemount.remote_path,
+        local_path: _histRemount.localPath,
+        password: document.getElementById('hist-remount-pass').value,
+        key_path: document.getElementById('hist-remount-key').value.trim(),
+        create_local_dir: true,
+        use_sudo_mkdir: document.getElementById('hist-remount-sudo').checked,
+      }),
+    });
+    const j = await r.json();
+    if (j.ok && j.data && (j.data.mounted || j.data.already)) {
+      msg.style.color = 'var(--green)';
+      msg.textContent = 'Mounted. Refreshing…';
+      await fetch('/api/mounts/refresh', {method:'POST'});
+      setTimeout(() => location.reload(), 600);
+    } else {
+      const err = (j.data && j.data.error) || j.error || 'mount failed';
+      msg.style.color = 'var(--danger)';
+      msg.textContent = err;
+    }
+  } catch(e) {
+    msg.style.color = 'var(--danger)';
+    msg.textContent = e.message;
+  } finally {
+    btn.disabled = false;
+  }
 }
 
 // ── Context menu ─────────────────────────────────────────

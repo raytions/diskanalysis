@@ -761,6 +761,7 @@ select option { background: var(--surface); color: var(--text); }
 
 .scans-layout { display: grid; grid-template-columns: minmax(300px, 380px) minmax(0, 1fr); gap: 1.25rem; align-items: flex-start; }
 .scans-layout-history-only { grid-template-columns: minmax(0, 1fr); }
+.scans-control-stack { min-width: 0; }
 .scans-run-panel { min-width: 0; }
 
 #mount-list {

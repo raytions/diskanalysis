@@ -10,6 +10,7 @@
 <div class="scans-layout{% if not can_admin %} scans-layout-history-only{% endif %}">
 
 {% if can_admin %}
+<div class="scans-control-stack">
 <section class="card scans-run-panel" style="min-width:0;">
   <h2>Run Scan</h2>
   <form id="scan-form" onsubmit="submitScan(event)">
@@ -87,6 +88,82 @@
   </form>
   <div id="scan-result" style="display:none;margin-top:.75rem;"></div>
 </section>
+
+<section class="card scans-run-panel" style="min-width:0;margin-top:1rem;">
+  <div style="display:flex;align-items:center;justify-content:space-between;gap:.75rem;margin-bottom:.85rem;">
+    <h2 style="margin:0;">Auto Scan</h2>
+    <span class="badge {% if scan_schedule.enabled %}badge-running{% else %}badge-stopped{% endif %}">
+      {% if scan_schedule.enabled %}On{% else %}Off{% endif %}
+    </span>
+  </div>
+  <div class="form-group">
+    <label style="font-weight:400;font-size:.85rem;display:flex;align-items:center;gap:.45rem;cursor:pointer;">
+      <input type="checkbox" id="schedule-enabled" {% if scan_schedule.enabled %}checked{% endif %}>
+      Enable scheduled scans
+    </label>
+  </div>
+  <div class="form-group">
+    <label>Interval</label>
+    <div style="display:flex;align-items:center;gap:.5rem;">
+      <input type="number" id="schedule-interval" value="{{ scan_schedule.interval_minutes }}" min="1" max="10080" style="max-width:100px;text-align:center;">
+      <span class="dimmed">minutes</span>
+    </div>
+  </div>
+  <div class="form-group">
+    <label>Scan Target</label>
+    <select id="schedule-mode" onchange="onScheduleModeChange()">
+      <option value="all_mounts" {% if scan_schedule.scan_mode == 'all_mounts' %}selected{% endif %}>All Mounts</option>
+      <option value="selected_mounts" {% if scan_schedule.scan_mode == 'selected_mounts' %}selected{% endif %}>Selected Mounts</option>
+      <option value="path" {% if scan_schedule.scan_mode == 'path' %}selected{% endif %}>Specific Path</option>
+    </select>
+  </div>
+  <div class="form-group" id="schedule-mounts-row">
+    <label>Mounts</label>
+    <div style="border:1px solid var(--border);border-radius:6px;max-height:180px;overflow-y:auto;padding:.2rem 0;">
+      {% for m in mounts %}
+      <label class="mount-row" style="display:flex;align-items:center;gap:.5rem;padding:.3rem .65rem;cursor:pointer;">
+        <input type="checkbox" class="schedule-mount-id" value="{{ m.id }}" {% if m.id in scan_schedule.mount_ids %}checked{% endif %}>
+        <span class="mount-dot dot-green"></span>
+        <span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-family:monospace;font-size:.8rem;">{{ m.mount_point }}</span>
+      </label>
+      {% endfor %}
+    </div>
+  </div>
+  <div class="form-group" id="schedule-path-row">
+    <label>Target Path</label>
+    <input type="text" id="schedule-target-path" value="{{ scan_schedule.target_path }}" placeholder="/mnt/nas1/data">
+  </div>
+  <div class="form-group">
+    <label>Scan Type</label>
+    <select id="schedule-scan-type">
+      <option value="full" {% if scan_schedule.scan_type == 'full' %}selected{% endif %}>Full Scan</option>
+      <option value="incremental" {% if scan_schedule.scan_type == 'incremental' %}selected{% endif %}>Incremental</option>
+    </select>
+  </div>
+  <div class="form-group">
+    <label>Cold Threshold</label>
+    <input type="number" id="schedule-cold-days" value="{{ scan_schedule.cold_days }}" min="1" style="max-width:100px;text-align:center;">
+  </div>
+  <div class="form-group">
+    <label>Exclude Paths</label>
+    <input type="text" id="schedule-exclude" value="{{ scan_schedule.exclude_rules }}" placeholder="/tmp,*.cache" style="font-size:.83rem;">
+  </div>
+  <div class="form-group">
+    <label style="font-weight:400;font-size:.85rem;display:flex;align-items:center;gap:.4rem;cursor:pointer;">
+      <input type="checkbox" id="schedule-boundary" {% if scan_schedule.filesystem_boundary_only %}checked{% endif %}>
+      Stay within filesystem boundary
+    </label>
+  </div>
+  <div class="form-actions">
+    <button class="btn btn-primary" onclick="saveScanSchedule()">Save Auto Scan</button>
+    <span id="schedule-msg" style="font-size:.83rem;color:var(--text-dim);margin-left:.5rem;"></span>
+  </div>
+  <div class="setting-hint" style="margin-top:.7rem;">
+    Next: {{ scan_schedule.next_run_at or 'not scheduled' }}
+    {% if scan_schedule.last_started_at %} · Last: {{ scan_schedule.last_started_at }}{% endif %}
+  </div>
+</section>
+</div>
 {% endif %}
 
 <section class="card" style="flex:1;min-width:0;">
@@ -215,6 +292,56 @@ function showScanErr(msg) {
   const el = document.getElementById('scan-result');
   el.innerHTML = '<div class="error-banner">' + msg + '</div>';
   el.style.display = '';
+}
+
+function onScheduleModeChange() {
+  const mode = document.getElementById('schedule-mode')?.value || 'all_mounts';
+  const mountsRow = document.getElementById('schedule-mounts-row');
+  const pathRow = document.getElementById('schedule-path-row');
+  if (mountsRow) mountsRow.style.display = mode === 'selected_mounts' ? '' : 'none';
+  if (pathRow) pathRow.style.display = mode === 'path' ? '' : 'none';
+}
+
+async function saveScanSchedule() {
+  const msg = document.getElementById('schedule-msg');
+  const mode = document.getElementById('schedule-mode').value;
+  const mountIds = [...document.querySelectorAll('.schedule-mount-id:checked')].map(cb => parseInt(cb.value));
+  const payload = {
+    enabled: document.getElementById('schedule-enabled').checked,
+    interval_minutes: parseInt(document.getElementById('schedule-interval').value || '360'),
+    scan_mode: mode,
+    scan_type: document.getElementById('schedule-scan-type').value,
+    mount_ids: mountIds,
+    target_path: document.getElementById('schedule-target-path').value.trim(),
+    filesystem_boundary_only: document.getElementById('schedule-boundary').checked,
+    exclude_rules: document.getElementById('schedule-exclude').value.trim(),
+    cold_days: parseInt(document.getElementById('schedule-cold-days').value || '90'),
+  };
+  if (payload.enabled && mode === 'selected_mounts' && !mountIds.length) {
+    msg.style.color = 'var(--danger)'; msg.textContent = 'Select at least one mount'; return;
+  }
+  if (payload.enabled && mode === 'path' && !payload.target_path) {
+    msg.style.color = 'var(--danger)'; msg.textContent = 'Enter a target path'; return;
+  }
+  msg.style.color = 'var(--text-dim)'; msg.textContent = 'Saving…';
+  try {
+    const r = await fetch('/api/settings/scan-schedule', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify(payload),
+    });
+    const j = await r.json();
+    if (j.ok) {
+      msg.style.color = 'var(--green)';
+      msg.textContent = 'Saved';
+      setTimeout(() => location.reload(), 800);
+    } else {
+      msg.style.color = 'var(--danger)';
+      msg.textContent = j.error || 'Save failed';
+    }
+  } catch(e) {
+    msg.style.color = 'var(--danger)';
+    msg.textContent = e.message;
+  }
 }
 
 // ── History multi-select ─────────────────────────────────
@@ -364,5 +491,6 @@ async function _pollActive() {
 }
 
 if (_activeIds.size > 0) setTimeout(_pollActive, 3000);
+onScheduleModeChange();
 </script>
 {% endblock %}

@@ -131,114 +131,6 @@
         {% endif %}
       </div>
 
-      <div class="card" style="margin-top:1.25rem;">
-        <div class="settings-sec-head">
-          <h2>Scheduled Scans</h2>
-        </div>
-        <p class="settings-desc">
-          Runs inside the web app process. If another scan is running at the scheduled time,
-          that run is skipped and the next interval is scheduled.
-        </p>
-        {% if can_admin %}
-        <div class="setting-row">
-          <div>
-            <div class="setting-label">Enable schedule</div>
-            <div class="setting-hint">Automatically start scans after the configured interval</div>
-          </div>
-          <label class="toggle-switch">
-            <input type="checkbox" id="schedule-enabled" {% if scan_schedule.enabled %}checked{% endif %}>
-            <span class="toggle-slider"></span>
-          </label>
-        </div>
-        <div class="setting-row">
-          <div>
-            <div class="setting-label">Interval</div>
-            <div class="setting-hint">Minutes between automatic scans, 1 to 10080</div>
-          </div>
-          <div class="setting-ctrl">
-            <input type="number" id="schedule-interval" class="settings-input"
-                   value="{{ scan_schedule.interval_minutes }}" min="1" max="10080"
-                   style="width:92px;text-align:center;font-variant-numeric:tabular-nums;">
-            <span class="setting-msg-inline">min</span>
-          </div>
-        </div>
-        <div class="setting-row">
-          <div>
-            <div class="setting-label">Scan target</div>
-            <div class="setting-hint">Use all mounts, selected mounts, or a specific path</div>
-          </div>
-          <div class="setting-ctrl">
-            <select id="schedule-mode" class="settings-input" onchange="onScheduleModeChange()" style="width:170px;">
-              <option value="all_mounts" {% if scan_schedule.scan_mode == 'all_mounts' %}selected{% endif %}>All Mounts</option>
-              <option value="selected_mounts" {% if scan_schedule.scan_mode == 'selected_mounts' %}selected{% endif %}>Selected Mounts</option>
-              <option value="path" {% if scan_schedule.scan_mode == 'path' %}selected{% endif %}>Specific Path</option>
-            </select>
-            <select id="schedule-scan-type" class="settings-input" style="width:140px;">
-              <option value="full" {% if scan_schedule.scan_type == 'full' %}selected{% endif %}>Full</option>
-              <option value="incremental" {% if scan_schedule.scan_type == 'incremental' %}selected{% endif %}>Incremental</option>
-            </select>
-          </div>
-        </div>
-        <div class="setting-row" id="schedule-mounts-row">
-          <div>
-            <div class="setting-label">Mounts</div>
-            <div class="setting-hint">Only used in Selected Mounts mode</div>
-          </div>
-          <select id="schedule-mount-ids" class="settings-input" multiple size="6" style="max-width:460px;min-width:280px;">
-            {% for m in mounts %}
-            <option value="{{ m.id }}" {% if m.id in scan_schedule.mount_ids %}selected{% endif %}>{{ m.mount_point }}</option>
-            {% endfor %}
-          </select>
-        </div>
-        <div class="setting-row" id="schedule-path-row">
-          <div>
-            <div class="setting-label">Target path</div>
-            <div class="setting-hint">Only used in Specific Path mode</div>
-          </div>
-          <input type="text" id="schedule-target-path" class="settings-input"
-                 value="{{ scan_schedule.target_path }}" placeholder="/mnt/nas1/data" style="max-width:460px;">
-        </div>
-        <div class="setting-row">
-          <div>
-            <div class="setting-label">Scan options</div>
-            <div class="setting-hint">Cold threshold and exclude rules reused for each automatic scan</div>
-          </div>
-          <div class="setting-ctrl">
-            <input type="number" id="schedule-cold-days" class="settings-input"
-                   value="{{ scan_schedule.cold_days }}" min="1" style="width:92px;text-align:center;">
-            <input type="text" id="schedule-exclude" class="settings-input"
-                   value="{{ scan_schedule.exclude_rules }}" placeholder="/tmp,*.cache" style="width:220px;">
-            <label style="display:flex;align-items:center;gap:.4rem;color:var(--text-dim);font-size:.82rem;">
-              <input type="checkbox" id="schedule-boundary" {% if scan_schedule.filesystem_boundary_only %}checked{% endif %}>
-              one filesystem
-            </label>
-          </div>
-        </div>
-        <div class="setting-row">
-          <div>
-            <div class="setting-label">Current schedule</div>
-            <div class="setting-hint">
-              Next: {{ scan_schedule.next_run_at or 'not scheduled' }}
-              {% if scan_schedule.last_started_at %} · Last: {{ scan_schedule.last_started_at }}{% endif %}
-            </div>
-          </div>
-          <div class="setting-ctrl">
-            <button class="btn btn-primary btn-sm" onclick="saveScanSchedule()">Save Schedule</button>
-            <span id="schedule-msg" class="setting-msg-inline"></span>
-          </div>
-        </div>
-        {% else %}
-        <div class="setting-row">
-          <div>
-            <div class="setting-label">Scheduled scans</div>
-            <div class="setting-hint">Every {{ scan_schedule.interval_minutes }} minute(s); next run: {{ scan_schedule.next_run_at or 'not scheduled' }}</div>
-          </div>
-          <span class="badge {% if scan_schedule.enabled %}badge-running{% else %}badge-stopped{% endif %}">
-            {% if scan_schedule.enabled %}On{% else %}Off{% endif %}
-          </span>
-        </div>
-        {% endif %}
-      </div>
     </div>
 
     <!-- Attribution Cache (admin only) -->
@@ -591,7 +483,6 @@ function showSection(id) {
   const hash = location.hash.slice(1);
   const ids = [...document.querySelectorAll('.settings-section')].map(s => s.id);
   showSection(ids.includes(hash) ? hash : ids[0]);
-  onScheduleModeChange();
 })();
 
 // ── Per-table selection state ──────────────────────────────
@@ -808,14 +699,6 @@ async function saveParallel() {
   } catch(e) { msg.style.color='var(--danger)'; msg.textContent='✗'; }
 }
 
-function onScheduleModeChange() {
-  const mode = document.getElementById('schedule-mode')?.value || 'all_mounts';
-  const mountsRow = document.getElementById('schedule-mounts-row');
-  const pathRow = document.getElementById('schedule-path-row');
-  if (mountsRow) mountsRow.style.display = mode === 'selected_mounts' ? 'flex' : 'none';
-  if (pathRow) pathRow.style.display = mode === 'path' ? 'flex' : 'none';
-}
-
 async function saveSudoMode(enabled) {
   const msg = document.getElementById('sudo-msg');
   msg.textContent = 'Saving…'; msg.style.color = 'var(--text-dim)';
@@ -830,42 +713,6 @@ async function saveSudoMode(enabled) {
       msg.textContent = enabled
         ? '✓ Enabled. Configure sudoers for non-interactive install -d.'
         : '✓ Disabled.';
-    } else { msg.style.color = 'var(--danger)'; msg.textContent = '✗ ' + (j.error || 'failed'); }
-  } catch(e) { msg.style.color = 'var(--danger)'; msg.textContent = '✗ ' + e.message; }
-}
-
-async function saveScanSchedule() {
-  const msg = document.getElementById('schedule-msg');
-  const mode = document.getElementById('schedule-mode').value;
-  const mountIds = [...document.getElementById('schedule-mount-ids').selectedOptions].map(o => parseInt(o.value));
-  const payload = {
-    enabled: document.getElementById('schedule-enabled').checked,
-    interval_minutes: parseInt(document.getElementById('schedule-interval').value || '360'),
-    scan_mode: mode,
-    scan_type: document.getElementById('schedule-scan-type').value,
-    mount_ids: mountIds,
-    target_path: document.getElementById('schedule-target-path').value.trim(),
-    filesystem_boundary_only: document.getElementById('schedule-boundary').checked,
-    exclude_rules: document.getElementById('schedule-exclude').value.trim(),
-    cold_days: parseInt(document.getElementById('schedule-cold-days').value || '90'),
-  };
-  if (payload.enabled && mode === 'selected_mounts' && !mountIds.length) {
-    msg.style.color = 'var(--danger)'; msg.textContent = 'Select mounts'; return;
-  }
-  if (payload.enabled && mode === 'path' && !payload.target_path) {
-    msg.style.color = 'var(--danger)'; msg.textContent = 'Enter path'; return;
-  }
-  msg.textContent = 'Saving…'; msg.style.color = 'var(--text-dim)';
-  try {
-    const r = await fetch('/api/settings/scan-schedule', {
-      method: 'POST', headers: {'Content-Type':'application/json'},
-      body: JSON.stringify(payload),
-    });
-    const j = await r.json();
-    if (j.ok) {
-      msg.style.color = 'var(--green)';
-      msg.textContent = '✓ Saved';
-      setTimeout(() => location.reload(), 900);
     } else { msg.style.color = 'var(--danger)'; msg.textContent = '✗ ' + (j.error || 'failed'); }
   } catch(e) { msg.style.color = 'var(--danger)'; msg.textContent = '✗ ' + e.message; }
 }
