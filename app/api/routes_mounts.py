@@ -3,6 +3,7 @@ import io
 import json
 import logging
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -441,6 +442,40 @@ def _wait_unmounted_and_healthy(path: str, timeout: float = 6.0) -> tuple[bool, 
     return False, last_msg or "mount point did not become ready"
 
 
+def _diagnose_remote_path(req: SSHMountRequest) -> str:
+    ssh = shutil.which("ssh")
+    if not ssh:
+        return "ssh is not installed"
+    host = req.host
+    cmd = [
+        ssh,
+        "-o", "StrictHostKeyChecking=no",
+        "-o", "ConnectTimeout=8",
+    ]
+    if req.port and req.port != 22:
+        cmd += ["-p", str(req.port)]
+    if req.key_path:
+        cmd += ["-i", req.key_path]
+    env = os.environ.copy()
+    if req.password:
+        sshpass = shutil.which("sshpass")
+        if not sshpass:
+            return "remote diagnostic skipped because sshpass is not installed"
+        env["SSHPASS"] = req.password
+        cmd = [sshpass, "-e"] + cmd
+    else:
+        cmd += ["-o", "BatchMode=yes"]
+    remote = shlex.quote(req.remote_path or "/")
+    remote_cmd = f"test -d {remote} && test -r {remote} && echo REMOTE_PATH_OK || echo REMOTE_PATH_NOT_READABLE"
+    cmd += [f"{req.username}@{host}", remote_cmd]
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=12, env=env)
+    except subprocess.TimeoutExpired:
+        return "remote diagnostic timed out"
+    output = (result.stdout or result.stderr or "").strip()
+    return f"remote diagnostic rc={result.returncode}: {output[:500]}"
+
+
 @router.post("/mounts/mount-ssh")
 def mount_ssh_fs(req: SSHMountRequest, request: Request, db: Session = Depends(get_db), _: None = Depends(auth.require_admin)):
     """Attempt to mount a remote SSH path via sshfs. Returns the sshfs command regardless."""
@@ -523,26 +558,17 @@ def mount_ssh_fs(req: SSHMountRequest, request: Request, db: Session = Depends(g
             "command": f"sudo apt install sshfs  # install first, then:\n{cmd_display}",
         })
 
-    # Password auth needs sshpass
     env = None
     full_cmd = cmd_parts
+    input_text = None
     if req.password:
-        if shutil.which("sshpass"):
-            env = os.environ.copy()
-            env["SSHPASS"] = req.password
-            full_cmd = ["sshpass", "-e"] + cmd_parts
-        else:
-            log_mount_event(db, mount_point=local, event_type="mount", status="failed",
-                            message="sshpass is not installed for password auth.", command=cmd_display,
-                            details={"remote": remote})
-            return ok({
-                "mounted": False,
-                "error": "sshpass is not installed (required for password auth). Install it or use SSH key auth instead.",
-                "command": f"sudo apt install sshpass  # then retry, or use SSH key:\n{cmd_display}",
-            })
+        cmd_parts = ["sshfs"] + opts + ["-o", "password_stdin"] + [remote, local]
+        cmd_display = " ".join(cmd_parts)
+        full_cmd = cmd_parts
+        input_text = req.password + "\n"
 
     try:
-        result = subprocess.run(full_cmd, capture_output=True, text=True, timeout=30, env=env)
+        result = subprocess.run(full_cmd, input=input_text, capture_output=True, text=True, timeout=30, env=env)
         if result.returncode == 0:
             mounted_fs = None
             health_msg = ""
@@ -557,6 +583,7 @@ def mount_ssh_fs(req: SSHMountRequest, request: Request, db: Session = Depends(g
                     health_msg = "not present in /proc/mounts"
                 time.sleep(0.3)
             if not mounted_fs:
+                remote_diag = _diagnose_remote_path(req)
                 msg = "sshfs exited successfully, but the mount point is not accessible: " + health_msg
                 cleanup_ok, cleanup_msg = _try_unmount(local, lazy=True)
                 log_mount_event(db, mount_point=local, event_type="mount", status="failed",
@@ -566,7 +593,9 @@ def mount_ssh_fs(req: SSHMountRequest, request: Request, db: Session = Depends(g
                                     "mkdir_command": mkdir_command,
                                     "cleanup_ok": cleanup_ok,
                                     "cleanup": cleanup_msg,
+                                    "remote_diagnostic": remote_diag,
                                 })
+                msg += f" Remote check: {remote_diag}."
                 if cleanup_ok:
                     msg += f" The bad sshfs mount was detached automatically ({cleanup_msg})."
                 else:
