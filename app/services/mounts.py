@@ -62,8 +62,8 @@ def _parse_proc_mounts() -> Iterator[dict]:
                 if len(parts) < 4:
                     continue
                 yield {
-                    "device": parts[0],
-                    "mount_point": parts[1],
+                    "device": _decode_proc_mount_field(parts[0]),
+                    "mount_point": _decode_proc_mount_field(parts[1]),
                     "fs_type": parts[2],
                     "options": parts[3],
                 }
@@ -73,6 +73,13 @@ def _parse_proc_mounts() -> Iterator[dict]:
 
 def _is_network_fs(fs_type: str) -> bool:
     return fs_type.lower() in settings.network_fs_types_set
+
+
+def _decode_proc_mount_field(value: str) -> str:
+    try:
+        return bytes(value, "utf-8").decode("unicode_escape")
+    except UnicodeDecodeError:
+        return value
 
 
 def _get_disk_usage(mount_point: str) -> tuple[int, int, int, float]:

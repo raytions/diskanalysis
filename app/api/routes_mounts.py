@@ -419,7 +419,7 @@ def mount_ssh_fs(req: SSHMountRequest, request: Request, db: Session = Depends(g
     cmd_display = " ".join(cmd_parts)
 
     # Already mounted?
-    if os.path.ismount(local):
+    if _check_proc_mounts(local):
         log_mount_event(
             db, mount_point=local, event_type="mount", status="ok",
             message="SSHFS mount already exists.", command=cmd_display,
@@ -476,10 +476,27 @@ def mount_ssh_fs(req: SSHMountRequest, request: Request, db: Session = Depends(g
     try:
         result = subprocess.run(full_cmd, capture_output=True, text=True, timeout=30, env=env)
         if result.returncode == 0:
+            mounted_fs = None
+            for _ in range(10):
+                mounted_fs = _check_proc_mounts(local)
+                if mounted_fs:
+                    break
+                time.sleep(0.3)
+            if not mounted_fs:
+                msg = "sshfs exited successfully, but the mount point did not appear in /proc/mounts."
+                log_mount_event(db, mount_point=local, event_type="mount", status="failed",
+                                message=msg, command=cmd_display,
+                                details={"remote": remote, "mkdir_command": mkdir_command})
+                return ok({
+                    "mounted": False,
+                    "error": msg,
+                    "command": cmd_display,
+                    "mkdir_command": mkdir_command,
+                })
             log_mount_event(db, mount_point=local, event_type="mount", status="ok",
                             message="SSHFS mounted successfully.", command=cmd_display,
-                            details={"remote": remote, "mkdir_command": mkdir_command})
-            return ok({"mounted": True, "command": cmd_display, "mkdir_command": mkdir_command})
+                            details={"remote": remote, "fs_type": mounted_fs, "mkdir_command": mkdir_command})
+            return ok({"mounted": True, "fs_type": mounted_fs, "command": cmd_display, "mkdir_command": mkdir_command})
         err_msg = (result.stderr or result.stdout or "sshfs exited with error").strip()
         log_mount_event(db, mount_point=local, event_type="mount", status="failed",
                         message=err_msg, command=cmd_display,
@@ -512,11 +529,18 @@ def _check_proc_mounts(path: str) -> str | None:
         with open("/proc/mounts") as f:
             for line in f:
                 parts = line.split()
-                if len(parts) >= 3 and parts[1] == norm:
+                if len(parts) >= 3 and _decode_proc_mount_field(parts[1]) == norm:
                     return parts[2]
     except OSError:
         pass
     return None
+
+
+def _decode_proc_mount_field(value: str) -> str:
+    try:
+        return bytes(value, "utf-8").decode("unicode_escape")
+    except UnicodeDecodeError:
+        return value
 
 
 @router.get("/mounts/test-path")

@@ -2,6 +2,7 @@ import logging
 from fastapi import APIRouter, Depends, Form, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
+from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from app.db import get_db
@@ -28,9 +29,16 @@ def _fmt_bytes(n: int | None) -> str:
 def _get_mounted_paths() -> set:
     try:
         with open("/proc/mounts") as f:
-            return {line.split()[1] for line in f if line.strip()}
+            return {_decode_proc_mount_field(line.split()[1]) for line in f if line.strip()}
     except Exception:
         return set()
+
+
+def _decode_proc_mount_field(value: str) -> str:
+    try:
+        return bytes(value, "utf-8").decode("unicode_escape")
+    except UnicodeDecodeError:
+        return value
 
 
 def _fmt_duration(s: float | None) -> str:
@@ -93,6 +101,19 @@ def mounts_page(
 
     all_fs_types = sorted({m.fs_type for m in db.query(Mount).all()})
     mounted_paths = _get_mounted_paths()
+    with db.bind.connect() as conn:
+        indexed_rows = conn.execute(text("""
+            SELECT s.mount_id, s.total_bytes
+            FROM scans s
+            JOIN (
+                SELECT mount_id, MAX(id) AS latest_id
+                FROM scans
+                WHERE mount_id IS NOT NULL
+                  AND status IN ('completed','stopped','interrupted')
+                GROUP BY mount_id
+            ) latest ON latest.latest_id = s.id
+        """)).fetchall()
+    indexed_bytes = {r[0]: r[1] for r in indexed_rows}
     from app.services.mount_events import list_mount_events
     return _tr(request, "mounts.html", {
         "mounts": mounts,
@@ -100,6 +121,7 @@ def mounts_page(
         "fs_type": fs_type,
         "is_network": is_network,
         "mounted_paths": mounted_paths,
+        "indexed_bytes": indexed_bytes,
         "mount_events": list_mount_events(db, limit=12),
     })
 
@@ -158,7 +180,6 @@ def scan_detail_page(request: Request, scan_id: int, db: Session = Depends(get_d
 
 @router.get("/settings", response_class=HTMLResponse)
 def settings_page(request: Request, db: Session = Depends(get_db)):
-    from sqlalchemy import text
     from app.services.analytics import get_path_attribution_enabled
     from app.api.routes_settings import get_max_parallel_scans, get_sudo_mode_enabled
     with db.bind.connect() as conn:

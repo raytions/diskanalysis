@@ -231,8 +231,96 @@
 </section>
 {% endif %}
 
+{% if mounts %}
+<section class="card" style="padding:0;overflow:hidden;">
+<div class="table-wrapper">
+<table class="data-table" id="mounts-table">
+  <thead>
+    <tr>
+      <th class="sortable" data-col="mount_point" onclick="sortTable(this)">Mount Point</th>
+      <th>Device</th>
+      <th class="sortable" data-col="fs_type" onclick="sortTable(this)">FS Type</th>
+      <th class="num sortable" data-col="total_bytes" onclick="sortTable(this)">Total</th>
+      <th class="num sortable" data-col="used_bytes" onclick="sortTable(this)">Used</th>
+      <th class="num sortable" data-col="free_bytes" onclick="sortTable(this)">Free</th>
+      <th class="sortable" data-col="usage_percent" onclick="sortTable(this)">Usage</th>
+      <th>Last Scanned</th>
+      {% if not auth_enabled or is_admin %}<th>Actions</th>{% endif %}
+    </tr>
+  </thead>
+  <tbody id="mounts-tbody">
+    {% for m in mounts %}
+    {% set is_mounted = m.mount_point in mounted_paths %}
+    {% set indexed_size = indexed_bytes.get(m.id) %}
+    <tr data-selectable data-id="{{ m.id }}"
+        data-mount_point="{{ m.mount_point }}"
+        data-fs_type="{{ m.fs_type }}"
+        data-total_bytes="{{ m.total_bytes }}"
+        data-used_bytes="{{ m.used_bytes }}"
+        data-free_bytes="{{ m.free_bytes }}"
+        data-usage_percent="{{ m.usage_percent }}"
+        onclick="handleRowClick(event, this)"
+        oncontextmenu="showCtxMenu(event, {{ m.id }}, {{ ('`' + m.label + '`') if m.label else '``' }})">
+      <td title="{{ m.mount_point }}">
+        <div class="mnt-path-cell">
+          <span class="mount-dot {% if is_mounted %}dot-green{% else %}dot-red{% endif %}" style="flex-shrink:0;"></span>
+          <span class="mnt-path-text">
+            {% if m.label %}<strong>{{ m.label }}</strong> <span class="dimmed" style="font-size:.8rem;">{{ m.mount_point }}</span>
+            {% else %}<strong>{{ m.mount_point }}</strong>{% endif %}
+          </span>
+          {% if m.is_network_fs %}<span class="badge badge-net" style="flex-shrink:0;">NAS</span>{% endif %}
+        </div>
+      </td>
+      <td class="dimmed" title="{{ m.device }}"><div class="mnt-dev-cell">{{ m.device }}</div></td>
+      <td><code>{{ m.fs_type }}</code></td>
+      <td class="num">
+        {% if m.total_bytes > 0 %}{{ m.total_bytes | fmt_bytes }}{% else %}<span class="dimmed">—</span>{% endif %}
+      </td>
+      <td class="num">
+        {% if m.used_bytes > 0 %}{{ m.used_bytes | fmt_bytes }}
+        {% elif indexed_size %}<span title="Latest indexed scan size">{{ indexed_size | fmt_bytes }}</span>
+        {% else %}<span class="dimmed">—</span>{% endif %}
+      </td>
+      <td class="num">
+        {% if m.free_bytes > 0 %}{{ m.free_bytes | fmt_bytes }}{% else %}<span class="dimmed">—</span>{% endif %}
+      </td>
+      <td>
+        {% if m.total_bytes > 0 %}
+        <div class="usage-bar-wrap">
+          <div class="usage-bar {% if m.usage_percent > 90 %}danger{% elif m.usage_percent > 75 %}warn{% endif %}"
+               style="width:{{ [m.usage_percent, 100] | min }}%"></div>
+        </div>
+        {{ m.usage_percent }}%
+        {% elif indexed_size %}
+        <span class="badge">Last indexed {{ indexed_size | fmt_bytes }}</span>
+        {% else %}
+        <span class="dimmed">—</span>
+        {% endif %}
+      </td>
+      <td class="dimmed">{{ m.last_scanned_at.strftime('%Y-%m-%d %H:%M') if m.last_scanned_at else '—' }}</td>
+      {% if not auth_enabled or is_admin %}
+      <td>
+        {% if m.fs_type == 'fuse.sshfs' and not is_mounted %}
+        <button type="button" class="btn btn-sm" onclick="openHistoricRemount(event, {{ m.id }}, {{ m.device | tojson }}, {{ m.mount_point | tojson }})">Remount</button>
+        {% else %}
+        <span class="dimmed">—</span>
+        {% endif %}
+      </td>
+      {% endif %}
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+</div>
+</section>
+{% else %}
+<div class="empty-state">
+  <p>No mounts found. Click <strong>Refresh</strong> to discover mount points, or <strong>Add Mount</strong> to register one manually.</p>
+</div>
+{% endif %}
+
 {% if mount_events %}
-<section class="card" style="margin-bottom:1.25rem;">
+<section class="card" style="margin-top:1.25rem;">
   <div style="display:flex;align-items:center;justify-content:space-between;gap:1rem;margin-bottom:.75rem;flex-wrap:wrap;">
     <h2 style="margin:0;">Recent Mount Events</h2>
     <span class="dimmed" style="font-size:.82rem;">latest {{ mount_events|length }}</span>
@@ -262,78 +350,6 @@
     </table>
   </div>
 </section>
-{% endif %}
-
-{% if mounts %}
-<section class="card" style="padding:0;overflow:hidden;">
-<div class="table-wrapper">
-<table class="data-table" id="mounts-table">
-  <thead>
-    <tr>
-      <th class="sortable" data-col="mount_point" onclick="sortTable(this)">Mount Point</th>
-      <th>Device</th>
-      <th class="sortable" data-col="fs_type" onclick="sortTable(this)">FS Type</th>
-      <th class="num sortable" data-col="total_bytes" onclick="sortTable(this)">Total</th>
-      <th class="num sortable" data-col="used_bytes" onclick="sortTable(this)">Used</th>
-      <th class="num sortable" data-col="free_bytes" onclick="sortTable(this)">Free</th>
-      <th class="sortable" data-col="usage_percent" onclick="sortTable(this)">Usage</th>
-      <th>Last Scanned</th>
-      {% if not auth_enabled or is_admin %}<th>Actions</th>{% endif %}
-    </tr>
-  </thead>
-  <tbody id="mounts-tbody">
-    {% for m in mounts %}
-    <tr data-selectable data-id="{{ m.id }}"
-        data-mount_point="{{ m.mount_point }}"
-        data-fs_type="{{ m.fs_type }}"
-        data-total_bytes="{{ m.total_bytes }}"
-        data-used_bytes="{{ m.used_bytes }}"
-        data-free_bytes="{{ m.free_bytes }}"
-        data-usage_percent="{{ m.usage_percent }}"
-        onclick="handleRowClick(event, this)"
-        oncontextmenu="showCtxMenu(event, {{ m.id }}, {{ ('`' + m.label + '`') if m.label else '``' }})">
-      <td title="{{ m.mount_point }}">
-        <div class="mnt-path-cell">
-          <span class="mount-dot {% if m.mount_point in mounted_paths %}dot-green{% else %}dot-red{% endif %}" style="flex-shrink:0;"></span>
-          <span class="mnt-path-text">
-            {% if m.label %}<strong>{{ m.label }}</strong> <span class="dimmed" style="font-size:.8rem;">{{ m.mount_point }}</span>
-            {% else %}<strong>{{ m.mount_point }}</strong>{% endif %}
-          </span>
-          {% if m.is_network_fs %}<span class="badge badge-net" style="flex-shrink:0;">NAS</span>{% endif %}
-        </div>
-      </td>
-      <td class="dimmed" title="{{ m.device }}"><div class="mnt-dev-cell">{{ m.device }}</div></td>
-      <td><code>{{ m.fs_type }}</code></td>
-      <td class="num">{{ m.total_bytes | fmt_bytes }}</td>
-      <td class="num">{{ m.used_bytes | fmt_bytes }}</td>
-      <td class="num">{{ m.free_bytes | fmt_bytes }}</td>
-      <td>
-        <div class="usage-bar-wrap">
-          <div class="usage-bar {% if m.usage_percent > 90 %}danger{% elif m.usage_percent > 75 %}warn{% endif %}"
-               style="width:{{ [m.usage_percent, 100] | min }}%"></div>
-        </div>
-        {{ m.usage_percent }}%
-      </td>
-      <td class="dimmed">{{ m.last_scanned_at.strftime('%Y-%m-%d %H:%M') if m.last_scanned_at else '—' }}</td>
-      {% if not auth_enabled or is_admin %}
-      <td>
-        {% if m.fs_type == 'fuse.sshfs' and m.mount_point not in mounted_paths %}
-        <button type="button" class="btn btn-sm" onclick="openHistoricRemount(event, {{ m.id }}, {{ m.device | tojson }}, {{ m.mount_point | tojson }})">Remount</button>
-        {% else %}
-        <span class="dimmed">—</span>
-        {% endif %}
-      </td>
-      {% endif %}
-    </tr>
-    {% endfor %}
-  </tbody>
-</table>
-</div>
-</section>
-{% else %}
-<div class="empty-state">
-  <p>No mounts found. Click <strong>Refresh</strong> to discover mount points, or <strong>Add Mount</strong> to register one manually.</p>
-</div>
 {% endif %}
 
 <!-- Right-click context menu -->
