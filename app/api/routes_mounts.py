@@ -428,6 +428,19 @@ def _path_health(path: str, timeout: float = 3.0) -> tuple[bool, str]:
     return False, (result.stdout or result.stderr or "Path health check failed").strip()
 
 
+def _wait_unmounted_and_healthy(path: str, timeout: float = 6.0) -> tuple[bool, str]:
+    deadline = time.monotonic() + timeout
+    last_msg = ""
+    while time.monotonic() < deadline:
+        fs_type = _check_proc_mounts(path)
+        healthy, health_msg = _path_health(path, timeout=1.0)
+        if not fs_type and healthy:
+            return True, "ready"
+        last_msg = f"fs_type={fs_type or 'none'}, health={health_msg}"
+        time.sleep(0.35)
+    return False, last_msg or "mount point did not become ready"
+
+
 @router.post("/mounts/mount-ssh")
 def mount_ssh_fs(req: SSHMountRequest, request: Request, db: Session = Depends(get_db), _: None = Depends(auth.require_admin)):
     """Attempt to mount a remote SSH path via sshfs. Returns the sshfs command regardless."""
@@ -472,6 +485,15 @@ def mount_ssh_fs(req: SSHMountRequest, request: Request, db: Session = Depends(g
                 "error": f"Existing SSHFS mount is stale ({health_msg}) and could not be unmounted: {unmount_msg}",
                 "command": cmd_display,
             })
+        ready, ready_msg = _wait_unmounted_and_healthy(local)
+        if not ready:
+            msg = f"Stale SSHFS mount was detached, but the mount point is still not ready: {ready_msg}"
+            log_mount_event(
+                db, mount_point=local, event_type="mount", status="failed",
+                message=msg, command=cmd_display,
+                details={"remote": remote, "unmount": unmount_msg},
+            )
+            return ok({"mounted": False, "error": msg, "command": cmd_display})
 
     # Create local directory
     mkdir_command = ""

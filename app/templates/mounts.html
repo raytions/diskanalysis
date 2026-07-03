@@ -189,6 +189,7 @@
   <span id="sel-label" style="margin-left:auto;font-size:.82rem;color:var(--text-dim);visibility:hidden;"></span>
   <div id="sel-actions" style="display:none;gap:.35rem;align-items:center;">
     <button type="button" id="sel-scan" class="btn btn-primary btn-sm" style="min-width:5rem;" onclick="scanSelected()">Scan</button>
+    <button type="button" id="sel-remount" class="btn btn-sm" style="min-width:5rem;display:none;" onclick="remountSelected()">Remount</button>
     <button type="button" id="sel-delete" class="btn btn-danger btn-sm" style="min-width:5rem;" onclick="deleteSelected()">Delete</button>
   </div>
   {% endif %}
@@ -228,6 +229,7 @@
     <button type="button" class="btn btn-primary" id="hist-remount-btn" onclick="submitHistoricRemount()">Mount</button>
     <span id="hist-remount-msg" class="dimmed" style="font-size:.85rem;"></span>
   </div>
+  <div id="hist-remount-list" class="dimmed" style="font-size:.82rem;margin-top:.6rem;white-space:pre-wrap;"></div>
 </section>
 {% endif %}
 
@@ -245,7 +247,6 @@
       <th class="num sortable" data-col="free_bytes" onclick="sortTable(this)">Free</th>
       <th class="sortable" data-col="usage_percent" onclick="sortTable(this)">Usage</th>
       <th>Last Scanned</th>
-      {% if not auth_enabled or is_admin %}<th>Actions</th>{% endif %}
     </tr>
   </thead>
   <tbody id="mounts-tbody">
@@ -262,6 +263,9 @@
         data-used_bytes="{{ m.used_bytes }}"
         data-free_bytes="{{ m.free_bytes }}"
         data-usage_percent="{{ m.usage_percent }}"
+        data-device="{{ m.device }}"
+        data-is_sshfs="{{ '1' if m.fs_type == 'fuse.sshfs' else '0' }}"
+        data-is_mounted="{{ '1' if is_mounted else '0' }}"
         onclick="handleRowClick(event, this)"
         oncontextmenu="showCtxMenu(event, {{ m.id }}, {{ ('`' + m.label + '`') if m.label else '``' }})">
       <td title="{{ m.mount_point }}">
@@ -302,15 +306,6 @@
         {% endif %}
       </td>
       <td class="dimmed">{{ m.last_scanned_at.strftime('%Y-%m-%d %H:%M') if m.last_scanned_at else '—' }}</td>
-      {% if not auth_enabled or is_admin %}
-      <td>
-        {% if m.fs_type == 'fuse.sshfs' and not is_mounted %}
-        <button type="button" class="btn btn-sm" onclick="openHistoricRemount(event, {{ m.id }}, {{ m.device | tojson }}, {{ m.mount_point | tojson }})">Remount</button>
-        {% else %}
-        <span class="dimmed">—</span>
-        {% endif %}
-      </td>
-      {% endif %}
     </tr>
     {% endfor %}
   </tbody>
@@ -362,6 +357,7 @@
   <div class="ctx-item" onclick="_ctxAction('select')" id="ctx-select-item">Select</div>
   <div class="ctx-divider"></div>
   <div class="ctx-item" onclick="_ctxAction('rescan')">Rescan</div>
+  <div class="ctx-item" onclick="_ctxAction('remount')" id="ctx-remount-item">Remount SSHFS</div>
   <div class="ctx-divider"></div>
   <div class="ctx-item ctx-danger" onclick="_ctxAction('delete')">Delete</div>
 </div>
@@ -687,23 +683,52 @@ function parseSshDevice(device) {
   return { username, host, remote_path: remote };
 }
 
+function mountTargetFromRow(row) {
+  if (!row || row.dataset.is_sshfs !== '1' || row.dataset.is_mounted === '1') return null;
+  const parsed = parseSshDevice(row.dataset.device || '');
+  if (!parsed) return null;
+  return {
+    mountId: parseInt(row.dataset.id),
+    localPath: row.dataset.mount_point,
+    ...parsed,
+  };
+}
+
 function openHistoricRemount(event, mountId, device, localPath) {
-  event.preventDefault();
-  event.stopPropagation();
+  if (event) {
+    event.preventDefault();
+    event.stopPropagation();
+  }
   const parsed = parseSshDevice(device || '');
-  const panel = document.getElementById('historic-remount-panel');
-  const msg = document.getElementById('hist-remount-msg');
   if (!parsed) {
     showToast('Cannot parse SSHFS device: ' + device, 4000);
     return;
   }
-  _histRemount = { mountId, localPath, ...parsed };
-  document.getElementById('hist-remount-remote').value = `${parsed.username}@${parsed.host}:${parsed.remote_path}`;
-  document.getElementById('hist-remount-local').value = localPath;
+  openRemountTargets([{ mountId, localPath, ...parsed }]);
+}
+
+function openRemountTargets(targets) {
+  const panel = document.getElementById('historic-remount-panel');
+  const msg = document.getElementById('hist-remount-msg');
+  if (!targets.length) {
+    showToast('Select stale or unmounted SSHFS mount(s).', 3000);
+    return;
+  }
+  _histRemount = { targets };
+  const first = targets[0];
+  document.getElementById('hist-remount-remote').value = targets.length === 1
+    ? `${first.username}@${first.host}:${first.remote_path}`
+    : `${targets.length} SSHFS mounts selected`;
+  document.getElementById('hist-remount-local').value = targets.length === 1
+    ? first.localPath
+    : 'multiple mount points';
   document.getElementById('hist-remount-pass').value = '';
   document.getElementById('hist-remount-key').value = '';
   document.getElementById('hist-remount-sudo').checked = false;
   msg.textContent = '';
+  document.getElementById('hist-remount-list').textContent = targets
+    .map(t => `${t.localPath}  ←  ${t.username}@${t.host}:${t.remote_path}`)
+    .join('\n');
   panel.style.display = '';
   panel.scrollIntoView({ behavior: 'smooth', block: 'start' });
   document.getElementById('hist-remount-pass').focus();
@@ -719,34 +744,51 @@ async function submitHistoricRemount() {
   if (!_histRemount) return;
   const btn = document.getElementById('hist-remount-btn');
   const msg = document.getElementById('hist-remount-msg');
+  const list = document.getElementById('hist-remount-list');
+  const targets = _histRemount.targets || [];
+  const password = document.getElementById('hist-remount-pass').value;
+  const keyPath = document.getElementById('hist-remount-key').value.trim();
+  const useSudoMkdir = document.getElementById('hist-remount-sudo').checked;
   btn.disabled = true;
   msg.style.color = 'var(--text-dim)';
   msg.textContent = 'Mounting…';
+  const results = [];
   try {
-    const r = await fetch('/api/mounts/mount-ssh', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({
-        username: _histRemount.username,
-        host: _histRemount.host,
-        remote_path: _histRemount.remote_path,
-        local_path: _histRemount.localPath,
-        password: document.getElementById('hist-remount-pass').value,
-        key_path: document.getElementById('hist-remount-key').value.trim(),
-        create_local_dir: true,
-        use_sudo_mkdir: document.getElementById('hist-remount-sudo').checked,
-      }),
-    });
-    const j = await r.json();
-    if (j.ok && j.data && (j.data.mounted || j.data.already)) {
+    for (const target of targets) {
+      msg.textContent = `Mounting ${target.localPath}…`;
+      const r = await fetch('/api/mounts/mount-ssh', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({
+          username: target.username,
+          host: target.host,
+          remote_path: target.remote_path,
+          local_path: target.localPath,
+          password,
+          key_path: keyPath,
+          create_local_dir: true,
+          use_sudo_mkdir: useSudoMkdir,
+        }),
+      });
+      const j = await r.json();
+      const ok = j.ok && j.data && (j.data.mounted || j.data.already);
+      results.push({
+        target,
+        ok,
+        message: ok ? 'mounted' : ((j.data && j.data.error) || j.error || 'mount failed'),
+      });
+      list.textContent = results.map(r =>
+        `${r.ok ? 'OK' : 'FAIL'} ${r.target.localPath}: ${r.message}`
+      ).join('\n');
+    }
+    if (results.every(r => r.ok)) {
       msg.style.color = 'var(--green)';
       msg.textContent = 'Mounted. Refreshing…';
       await fetch('/api/mounts/refresh', {method:'POST'});
       setTimeout(() => location.reload(), 600);
     } else {
-      const err = (j.data && j.data.error) || j.error || 'mount failed';
       msg.style.color = 'var(--danger)';
-      msg.textContent = err;
+      msg.textContent = `${results.filter(r => !r.ok).length} mount(s) failed.`;
     }
   } catch(e) {
     msg.style.color = 'var(--danger)';
@@ -765,7 +807,10 @@ function showCtxMenu(e, mountId, label) {
   e.stopPropagation();
   _ctxMountId = mountId;
   _ctxLabel = label || '';
+  const row = document.querySelector(`#mounts-tbody tr[data-id="${mountId}"]`);
   document.getElementById('ctx-select-item').textContent = selected.has(String(mountId)) ? 'Deselect' : 'Select';
+  const remountItem = document.getElementById('ctx-remount-item');
+  if (remountItem) remountItem.style.display = mountTargetFromRow(row) ? '' : 'none';
   const menu = _ctxMenu;
   menu.style.display = 'block';
   const vw = window.innerWidth, vh = window.innerHeight;
@@ -811,6 +856,11 @@ async function _ctxAction(action) {
     const j = await r.json();
     if (j.ok) { showToast('Rescan started.', 2500); }
     else alert('Failed to start rescan: ' + (j.detail || j.error || 'unknown error'));
+  } else if (action === 'remount') {
+    const row = document.querySelector(`#mounts-tbody tr[data-id="${id}"]`);
+    const target = mountTargetFromRow(row);
+    if (!target) { showToast('This row is not a stale or unmounted SSHFS mount.', 3000); return; }
+    openRemountTargets([target]);
   } else if (action === 'delete') {
     const row = document.querySelector(`#mounts-tbody tr[data-id="${id}"]`);
     const mp = row?.dataset.mount_point || 'this mount';
@@ -842,13 +892,29 @@ function handleRowClick(event, row) {
 function updateSelectionUI() {
   const label = document.getElementById('sel-label');
   const actions = document.getElementById('sel-actions');
+  const remountBtn = document.getElementById('sel-remount');
   if (selected.size > 0) {
     if (label) { label.style.visibility = ''; label.textContent = selected.size + ' selected'; }
     if (actions) actions.style.display = 'flex';
+    if (remountBtn) {
+      const targets = [...selected]
+        .map(id => mountTargetFromRow(document.querySelector(`#mounts-tbody tr[data-id="${id}"]`)))
+        .filter(Boolean);
+      remountBtn.style.display = targets.length ? '' : 'none';
+      remountBtn.textContent = targets.length > 1 ? `Remount ${targets.length}` : 'Remount';
+    }
   } else {
     if (label) { label.style.visibility = 'hidden'; label.textContent = ''; }
     if (actions) actions.style.display = 'none';
+    if (remountBtn) remountBtn.style.display = 'none';
   }
+}
+
+function remountSelected() {
+  const targets = [...selected]
+    .map(id => mountTargetFromRow(document.querySelector(`#mounts-tbody tr[data-id="${id}"]`)))
+    .filter(Boolean);
+  openRemountTargets(targets);
 }
 
 async function scanSelected() {
