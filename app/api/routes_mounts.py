@@ -558,9 +558,19 @@ def mount_ssh_fs(req: SSHMountRequest, request: Request, db: Session = Depends(g
                 time.sleep(0.3)
             if not mounted_fs:
                 msg = "sshfs exited successfully, but the mount point is not accessible: " + health_msg
+                cleanup_ok, cleanup_msg = _try_unmount(local, lazy=True)
                 log_mount_event(db, mount_point=local, event_type="mount", status="failed",
-                                message=msg, command=cmd_display,
-                                details={"remote": remote, "mkdir_command": mkdir_command})
+                                message=f"{msg}; cleanup: {cleanup_msg}", command=cmd_display,
+                                details={
+                                    "remote": remote,
+                                    "mkdir_command": mkdir_command,
+                                    "cleanup_ok": cleanup_ok,
+                                    "cleanup": cleanup_msg,
+                                })
+                if cleanup_ok:
+                    msg += f" The bad sshfs mount was detached automatically ({cleanup_msg})."
+                else:
+                    msg += f" Automatic cleanup failed: {cleanup_msg}."
                 return ok({
                     "mounted": False,
                     "error": msg,

@@ -484,7 +484,7 @@ function applyMountState() {
     if (badge) badge.style.display = 'none';
     if (panel) panel.style.display = 'none';
   } else if (_isStale) {
-    btn.textContent = 'Unmount Stale';
+    btn.textContent = 'Detach Stale';
     btn.className = 'btn btn-danger';
     btn.disabled = false;
     if (badge) { badge.textContent = 'Stale'; badge.className = 'badge badge-danger'; badge.style.display = ''; }

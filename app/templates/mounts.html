@@ -788,7 +788,7 @@ async function submitHistoricRemount() {
       setTimeout(() => location.reload(), 600);
     } else {
       msg.style.color = 'var(--danger)';
-      msg.textContent = `${results.filter(r => !r.ok).length} mount(s) failed.`;
+      msg.textContent = `${results.filter(r => !r.ok).length} mount(s) failed. Bad sshfs mounts are detached automatically when possible.`;
     }
   } catch(e) {
     msg.style.color = 'var(--danger)';
