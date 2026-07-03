@@ -8,7 +8,7 @@ On a typical Linux system, each file has a uid (user ID). Resolving uid → user
 
 However, on NFS4 mounts **without uid isolation**, the NFS server assigns a single system uid (e.g. `1024`) to all files, regardless of who actually owns them. If uid `1024` happens to match a local user (e.g. `ula`), all 4 TB of NAS data gets attributed to `ula` — which is wrong.
 
-**Example:** `/media/NAS02/jiahao/` and `/media/NAS02/fanwen/` belong to different people, but all files have `uid=1024` (the NFS4 squash uid). Pure uid attribution would show everything as `ula`'s data.
+**Example:** `/mnt/research-a/alice/` and `/mnt/research-a/ben/` belong to different people, but all files have `uid=1024` (the NFS4 squash uid). Pure uid attribution would show everything under one local account.
 
 ---
 
@@ -23,10 +23,10 @@ For each mount, the system looks at the **immediate child directories** using th
 Each directory name is matched against the **Confirmed Users** list using **prefix matching**:
 
 ```
-/media/NAS02/jiahao/     → jiahao  (exact match)
-/media/NAS02/fanwen/     → fanwen  (exact match)
-/media/hdd/yyfangspx/   → yyfang  (prefix: "yyfang" matches "yyfangspx")
-/media/hdd/wangzi2022/  → wangzi  (prefix: "wangzi" matches "wangzi2022")
+/mnt/research-a/alice/       → alice  (exact match)
+/mnt/research-a/ben/         → ben    (exact match)
+/mnt/archive-b/chen-data/    → chen   (prefix: "chen" matches "chen-data")
+/mnt/archive-b/dana2026/     → dana   (prefix: "dana" matches "dana2026")
 ```
 
 Matching is case-insensitive. Longer usernames take priority (avoids false matches when one name is a prefix of another). Only directories that match are attributed in Phase 1a; their entire subtree is credited to the matched user.
@@ -36,9 +36,9 @@ Matching is case-insensitive. Longer usernames take priority (avoids false match
 For depth-1 directories that **did not match** any user (e.g. an intermediate container directory like `USER_PATH`), the system looks **one level deeper** and matches their immediate children against the Confirmed Users list:
 
 ```
-/media/NAS/USER_PATH/yyfang/   → yyfang  (matched at depth 2, under unmatched USER_PATH)
-/media/NAS/USER_PATH/wangzi/   → wangzi  (matched at depth 2)
-/media/NAS/jiahao/             → jiahao  (matched at depth 1 as normal)
+/mnt/research-a/USER_PATH/alice/   → alice  (matched at depth 2, under unmatched USER_PATH)
+/mnt/research-a/USER_PATH/ben/     → ben    (matched at depth 2)
+/mnt/research-a/chen/              → chen   (matched at depth 1 as normal)
 ```
 
 This handles NAS layouts where user directories are placed inside an intermediate container directory rather than directly under the mount point.

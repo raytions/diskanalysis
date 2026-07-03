@@ -1,68 +1,142 @@
 # Deployment Guide
 
-## Docker (recommended for web panel)
+DiskAnalysis can run directly on a Linux host or in Docker. For the most accurate mount discovery and filesystem metadata, run it where it can see the real mount paths and `/proc/mounts`.
+
+## Docker
 
 ```bash
-# 1. Copy and edit config
 cp .env.example .env
-# Edit .env: set DB_PATH to a path reachable by both scanner and container
+mkdir -p data
+docker compose up -d
+```
 
-# 2. Create data directory
+Open:
+
+```text
+http://localhost:8000
+```
+
+The compose file stores SQLite data in `./data` and exposes the app on `APP_PORT`.
+
+If the container must scan host paths, bind-mount those paths explicitly:
+
+```yaml
+services:
+  web:
+    volumes:
+      - ./data:/data
+      - /mnt/research-a:/mnt/research-a:ro
+      - /mnt/archive-b:/mnt/archive-b:ro
+      - /proc:/proc:ro
+```
+
+Set:
+
+```env
+DB_PATH=/data/diskanalysis.db
+```
+
+## Host Mode
+
+Host mode is often simpler for NAS-heavy servers.
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+
+cp .env.example .env
 mkdir -p data
 
-# 3. Start web panel
-docker compose up -d
-
-# 4. Open browser
-open http://localhost:8000
+uvicorn app.main:app --host 0.0.0.0 --port 8000
 ```
 
-The `docker-compose.yml` bind-mounts `./data` as `/data` inside the container. Set `DB_PATH=/data/diskanalysis.db` to share the database between host scanner and container.
+For persistent service management, use systemd.
 
-## Systemd timer (for scanner)
+## systemd Web Service
 
-```bash
-# Copy unit files
-sudo cp deploy/diskscan.service /etc/systemd/system/
-sudo cp deploy/diskscan.timer /etc/systemd/system/
-
-# Edit the service file — set WorkingDirectory and DB_PATH
-sudo nano /etc/systemd/system/diskscan.service
-
-# Enable and start
-sudo systemctl daemon-reload
-sudo systemctl enable --now diskscan.timer
-
-# Check status
-sudo systemctl status diskscan.timer
-sudo journalctl -u diskscan.service -f
-```
-
-Example `diskscan.service`:
+Example:
 
 ```ini
 [Unit]
-Description=DiskAnalysis Scanner
+Description=DiskAnalysis Web
+After=network-online.target
+Wants=network-online.target
 
 [Service]
-Type=oneshot
+Type=simple
 WorkingDirectory=/opt/diskanalysis
-Environment=DB_PATH=/opt/diskanalysis/data/diskanalysis.db
-ExecStart=/opt/diskanalysis/.venv/bin/python -m app.scanner scan --all-mounts --cold-days 90
+EnvironmentFile=/opt/diskanalysis/.env
+ExecStart=/opt/diskanalysis/.venv/bin/uvicorn app.main:app --host 0.0.0.0 --port 8000
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
 ```
 
-## Cron alternative
+Enable it:
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable --now diskanalysis-web.service
+sudo journalctl -u diskanalysis-web.service -f
+```
+
+## Scheduled Scans
+
+Preferred option: configure **Auto Scan** from the Scans page.
+
+Auto Scan stores its schedule in SQLite and shows:
+
+- enabled/disabled state
+- interval
+- target selection
+- next run time
+- last started time
+- last scheduler status message
+- currently active scheduled scans
+
+CLI cron/systemd is still possible if you prefer external scheduling:
 
 ```cron
-# /etc/cron.d/diskanalysis
-# Full scan nightly at 02:00
-0 2 * * *   root  cd /opt/diskanalysis && .venv/bin/python -m app.scanner scan --all-mounts
-
-# Incremental scan of a specific NAS every 6 hours
-0 */6 * * * root  cd /opt/diskanalysis && .venv/bin/python -m app.scanner scan --mount /media/nas02 --incremental
+# Full scan every night at 02:00
+0 2 * * * root cd /opt/diskanalysis && .venv/bin/python -m app.scanner scan --all-mounts
 ```
 
-## Nginx reverse proxy
+The old incremental scan examples were removed because incremental scan mode is no longer supported.
+
+## SSHFS Requirements
+
+For SSHFS mount management from the web UI, install host packages:
+
+```bash
+sudo apt install sshfs fuse3 openssh-client sshpass
+```
+
+Notes:
+
+- `sshfs` performs the actual FUSE mount.
+- `fusermount3`/`fusermount` is used for unmount and lazy detach.
+- `sshpass` is used only when a password is supplied through the web form.
+- Key-based SSHFS mounts can use a configured private key path.
+
+The app can create mount directories from the web UI. Normal mode uses the web process user. Sudo mkdir mode is intentionally narrow and only creates local mount directories.
+
+## SSHFS Failure Handling
+
+SSHFS can return success while the mount path is unreadable, commonly with `EIO`. DiskAnalysis verifies the mount point after `sshfs` exits.
+
+If the path is not accessible, it:
+
+1. records the failure
+2. runs a remote-path diagnostic where possible
+3. lazy-detaches the bad FUSE mount
+4. keeps the event in Recent Mount Events
+
+This prevents stale broken SSHFS mounts from showing as healthy.
+
+## Nginx Reverse Proxy
 
 ```nginx
 server {
@@ -79,53 +153,40 @@ server {
 }
 ```
 
-For HTTPS, add Certbot or point to your internal CA.
+For HTTPS, terminate TLS with Certbot or an internal CA.
 
-## Running without Docker
+## Authentication
 
-If you prefer to run the web panel directly on the host:
-
-```bash
-pip install -r requirements.txt --break-system-packages
-cp .env.example .env
-
-# Start web panel
-uvicorn app.main:app --host 0.0.0.0 --port 8000
-
-# Or with auto-reload for development
-uvicorn app.main:app --reload --port 8000
-```
-
-## Auth setup
-
-To enable admin authentication, set `ADMIN_PASSWORD` in `.env`:
+Set an admin password:
 
 ```env
-ADMIN_PASSWORD=your-strong-password-here
+ADMIN_PASSWORD=change-this-password
 ```
 
-When set, all write operations (starting/stopping scans, deleting data, adding/removing mounts, modifying settings and users) require login. The dashboard and analytics pages are still publicly visible.
+When auth is enabled:
 
-The admin user icon in the top-right nav bar shows login/logout options when auth is enabled.
+- public pages can still be viewed
+- write operations require login
+- admin-only UI controls are hidden until login
 
-## Triggering scans from the web UI
+Write operations include starting/stopping scans, deleting scans, editing mounts, mounting/unmounting, changing settings, and user management.
 
-Scans can be started directly from the web panel without running the CLI:
+## Health Check
 
-- **Run Scan page** (`/trigger`): choose mode (selected mounts, all mounts, or specific path), scan type (full or incremental), cold threshold, and exclude rules.
-- **Mount Points page**: right-click any mount → **Rescan**, or select multiple mounts and click **Scan** in the selection bar.
-- **Mount Detail page**: click **Scan This Mount**.
+The API exposes:
 
-Web-triggered scans run in background threads inside the web container. The scan detail page polls for live progress (files indexed, total size, elapsed time). Scans can be stopped mid-run via the **Stop** button.
-
-## Containerising the scanner (advanced)
-
-Not recommended — prefer running the scanner on the host. If you must containerise it, mount the host filesystem read-only:
-
-```yaml
-volumes:
-  - /:/host:ro
-  - /proc:/proc:ro
+```text
+GET /api/health
 ```
 
-Set `SCAN_ROOTS=/host` and note that `shutil.disk_usage` paths and `/proc/mounts` entries will differ inside the container.
+Use it for Docker or reverse-proxy checks.
+
+## Public GitHub Checklist
+
+Before publishing a public repository:
+
+- review screenshots for private hostnames, user names, and mount names
+- leave `.env` untracked
+- keep only `.env.example`
+- decide and add a license if you want open-source reuse
+- remove private deployment notes from issues or docs

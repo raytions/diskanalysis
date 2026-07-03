@@ -642,7 +642,7 @@ def mount_ssh_fs(req: SSHMountRequest, request: Request, db: Session = Depends(g
 
 class MountAddRequest(BaseModel):
     mount_point: str          # local path where it's accessible
-    device: str = ""          # source (e.g. 192.168.1.100:/export, //server/share)
+    device: str = ""          # source (e.g. storage.example.internal:/export, //files.example.internal/share)
     fs_type: str = "nfs4"
     is_network_fs: bool = True
     description: str = ""

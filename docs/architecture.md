@@ -1,139 +1,166 @@
 # Architecture
 
-## Overview
+DiskAnalysis is a host-aware storage analytics app. It uses FastAPI for the web/API layer, Jinja2 for server-rendered pages, SQLite for persistence, and subprocess workers for long-running scans.
 
-DiskAnalysis is split into two decoupled components:
+## System Overview
 
-```
-┌─────────────────────────────────────────────────┐
-│  Host machine                                   │
-│                                                 │
-│  scanner (Python CLI)                           │
-│   ├─ reads /proc/mounts                         │
-│   ├─ walks filesystem with os.scandir           │
-│   └─ writes to SQLite → data/diskanalysis.db    │
-│                                                 │
-│  web panel (Docker, FastAPI + Jinja2)           │
-│   ├─ reads from same SQLite                     │
-│   ├─ triggers scans via background threads      │
-│   └─ serves HTTP on :8000                       │
-└─────────────────────────────────────────────────┘
-```
-
-The scanner runs on the host (as root or a privileged user). The web panel runs in Docker, reads from the shared SQLite database, and can also launch scans by spawning background threads that invoke the same scanner logic.
-
-## Why the scanner runs on the host
-
-- Needs `/proc/mounts` for accurate mount discovery
-- Needs real `atime`/`mtime`/`st_dev` values — not virtualized by container overlay
-- Needs permission escalation (root) to read NAS/NFS directories
-- `xdev` (filesystem boundary) detection via `os.stat().st_dev` requires native access
-
-## Data flow
-
-```
-1. Scanner runs (cron / systemd timer / web UI / manual):
-   app.scanner scan --all-mounts
-   — OR —
-   POST /api/scans  (web panel spawns background thread)
-
-2. For each mount:
-   a. os.scandir walk, batch of 500 files
-   b. Compute: size_bytes, atime, mtime, uid, extension, is_symlink
-   c. Compute: is_cold (atime < now - cold_days), cold_days_bucket
-   d. Bulk INSERT into files table
-   e. After walk: aggregate directories table (cumulative sizes per dir)
-   f. Update scans.cold_file_count, scans.cold_total_size_bytes
-   g. Trigger background user attribution cache rebuild for scanned mounts
-
-3. Web panel serves dashboard:
-   - Latest scan IDs per mount (ix_files_mount_scan index)
-   - UNION ALL per-mount queries for global overview tabs
-   - Per-mount analytics: largest files, dirs, cold files, extension summary
-   - By User tab: reads from user_attribution_cache (pre-warmed after scan)
+```text
+Browser
+  |
+  | HTTP
+  v
+FastAPI app
+  |-- Jinja pages: dashboard, mounts, scans, settings
+  |-- JSON APIs: /api/mounts, /api/scans, /api/settings
+  |-- scan scheduler thread
+  |-- scan subprocess launcher
+  |
+  v
+SQLite database, WAL mode
+  |
+  v
+Host filesystems and network mounts
 ```
 
-## Database schema
+The app is designed for Linux hosts with many mounted storage volumes. It can be run directly on the host or in Docker, but accurate scanning requires that the process can see the real mount points and `/proc/mounts`.
 
-```sql
-mounts (id, mount_point, device, fs_type, is_network_fs,
-        total_bytes, used_bytes, free_bytes, usage_percent,
-        is_accessible, last_scanned_at,
-        label, custom_host, custom_user, custom_paths,
-        auth_method, ssh_key_path)
+## Main Components
 
-scans  (id, mount_id, scan_mode, target_path, status,
-        started_at, finished_at, duration_seconds,
-        total_files, total_dirs, total_bytes, error_count,
-        cold_file_count, cold_total_size_bytes,
-        cold_days, exclude_rules, filesystem_boundary_only,
-        error_summary)
-
-files  (id, scan_id, mount_id, path, size_bytes,
-        atime, mtime, extension, uid, username,
-        is_symlink, is_cold, cold_days_bucket)
-
-directories (id, scan_id, mount_id, path,
-             total_size_bytes, file_count,
-             cold_file_count, cold_total_size_bytes)
-
-scan_errors (id, scan_id, path, error_type, error_message)
-
-user_attribution_cache (id, mount_id, scan_id, username,
-                        total_size_bytes, file_count,
-                        computed_at)
-
-custom_users  (id, username, aliases, created_at)
-
-app_settings  (key, value)
-```
-
-## Key indexes
-
-| Index | Purpose |
-|---|---|
-| `ix_files_mount_scan` | Fast latest-scan lookup per mount |
-| `ix_files_ms_size` | `ORDER BY size_bytes DESC` for largest-files queries |
-| `ix_files_ms_cold_size` | Cold files sorted by size |
-| `ix_files_ms_atime` | Cold files sorted by last access |
-| `ix_files_ms_mtime` | Files sorted by modification time |
-| `ix_files_scan_username` | Per-user file lookup |
-| `ix_files_scan_uid_size` | Uid-based aggregation |
-| `ix_files_mount_scan_path_uid` | Covering index for Phase 2 user attribution |
-| `ix_dirs_mount_scan_size` | Largest directories per mount |
-
-## Background thread model
-
-The web panel launches long-running operations in daemon threads:
-
-- **Scan execution** (`POST /api/scans`): each scan runs in its own thread; updates `scans.status`, `total_files`, `total_bytes` in real time; web clients poll `/api/scans/<id>` for progress.
-- **User attribution cache rebuild**: triggered after each scan completes; runs as a separate thread; batch-queries all mount caches at once.
-- **Mount record deletion**: when a mount is deleted, its database records (scan entries, file/dir rows, attribution cache) are purged in a background thread to avoid blocking the HTTP response.
-
-Scans can be stopped via `POST /api/scans/<id>/stop`, which sets a thread-local stop flag; the scanner checks it between directory batches.
-
-## Technology choices
-
-| Concern | Choice | Reason |
+| Component | Path | Responsibility |
 |---|---|---|
-| DB | SQLite (WAL mode) | Zero-ops, handles concurrent reads+writes, single file |
-| Web | FastAPI + Jinja2 | Fast, minimal, SSR avoids JS bundle complexity |
-| ORM | SQLAlchemy 2.x | Familiar, raw SQL escape hatch for performance |
-| Scanner | stdlib only | `os.scandir`, `os.stat`, `shutil.disk_usage` — no extra deps |
-| Config | pydantic-settings | `.env` file + env var override, typed |
-| UI icons | Inline SVG sprite | Single `<svg style="display:none">` block in base.html; all icons referenced via `<use href="#i-name"/>` — no external font or icon library dependency |
+| FastAPI app | `app/main.py` | App lifespan, startup cleanup, scheduler startup, route registration |
+| Page routes | `app/web/routes_pages.py` | HTML routes and template context |
+| Mount API | `app/api/routes_mounts.py` | Mount inventory, mount/unmount, SSHFS operations, analytics endpoints |
+| Scan API | `app/api/routes_scans.py` | Create scans, stop scans, batch stop/delete, process monitoring |
+| Settings API | `app/api/routes_settings.py` | Runtime settings, users, scan schedule status |
+| Scheduler | `app/services/scan_scheduler.py` | Auto Scan interval loop and status messages |
+| Scan worker | `app/scan_worker.py` | Subprocess entry point for web-triggered scans |
+| Scanner engine | `app/services/scanner.py` | Filesystem traversal and aggregate writes |
+| Analytics | `app/services/analytics.py` | Largest files/dirs, cold data, extension/user summaries |
+| Mount discovery | `app/services/mounts.py` | `/proc/mounts` parsing and disk usage collection |
 
-## SQLite tuning
+## Scan Execution Model
 
-`db.py` sets the following pragmas on every connection:
+Web-triggered scans are not run in request threads. The API creates a `scans` row, then launches:
+
+```text
+python -m app.scan_worker <scan_id> <request_json_b64>
+```
+
+This subprocess model is deliberate. Network filesystems can block in uninterruptible kernel I/O, and Python threads cannot reliably recover from that. With subprocesses, the app can:
+
+- set `stop_requested=true` in the database
+- send SIGTERM to the worker
+- escalate to SIGKILL if the worker does not exit
+- mark scans as `stopped` or `interrupted`
+
+The worker polls the database stop flag and also handles SIGTERM. The scanner checks the stop event between filesystem entries and progress flushes.
+
+## Scan Statuses
+
+| Status | Meaning |
+|---|---|
+| `queued` | A parallel scan was created but has not started yet |
+| `running` | Worker subprocess is active |
+| `completed` | Full scan finished and wrote a coherent snapshot |
+| `stopped` | User requested stop; partial progress is kept |
+| `interrupted` | Worker disappeared, server restarted, or process exited without normal completion |
+| `failed` | Scanner could not start or root path could not be scanned |
+
+Only `completed` scans trigger old-scan data cleanup and cache prewarm. Stopped/interrupted scans remain visible in history but are not treated as fresh full snapshots.
+
+## Auto Scan
+
+Auto Scan is configured from the Scans page and stored in `app_settings`:
+
+- `scan_schedule_enabled`
+- `scan_schedule_interval_minutes`
+- `scan_schedule_mode`
+- `scan_schedule_mount_ids`
+- `scan_schedule_target_path`
+- `scan_schedule_next_run_at`
+- `scan_schedule_last_started_at`
+- `scan_schedule_last_checked_at`
+- `scan_schedule_last_status`
+- `scan_schedule_last_message`
+
+The scheduler thread wakes every 30 seconds. If the schedule is due and no scans are active, it creates a normal scan request through the same API path. If active scans exist, it skips that run, records a status message, and schedules the next run.
+
+The Scans page polls `/api/settings/scan-schedule` so users can see whether Auto Scan is enabled, when it will run next, what happened last, and whether any scheduled scans are currently active.
+
+## Mount and SSHFS Management
+
+Mount data comes from both `/proc/mounts` and manually registered records. The Mounts UI supports:
+
+- live accessible/inaccessible state
+- right-click and multi-select actions
+- mount detail pages
+- SSHFS mount/unmount/remount
+- stale FUSE detection
+- lazy detach for broken SSHFS mounts
+- remote-path diagnostics for SSHFS failures
+- recent mount event history
+
+SSHFS mount attempts verify the local mount point after `sshfs` exits. If the command exits successfully but the path returns `EIO` or is not readable, the app detaches the bad FUSE mount and records diagnostics.
+
+## Database Model
+
+Core tables:
+
+```text
+mounts
+scans
+files
+directories
+scan_errors
+scan_ext_summary
+scan_uid_summary
+mount_events
+custom_users
+user_candidates
+user_attribution_cache
+app_settings
+```
+
+Scans do not store every file row forever. The scanner keeps top-N largest and coldest file rows, plus aggregate tables:
+
+- `directories`: cumulative directory size/count aggregates up to a bounded depth
+- `scan_ext_summary`: extension-level counts and bytes
+- `scan_uid_summary`: uid/user aggregates by top-level and second-level directories
+- `scans`: total counts, byte totals, cold totals, duration, errors
+
+After a completed scan for a mount, old detailed records for previous completed scans of that mount are purged. The historical `scans` metadata rows remain.
+
+## SQLite Settings
+
+`app/db.py` configures SQLite for concurrent web reads and scan writes:
 
 ```sql
 PRAGMA journal_mode=WAL;
 PRAGMA synchronous=NORMAL;
-PRAGMA cache_size=-131072;      -- 128 MB page cache
-PRAGMA temp_store=MEMORY;       -- sort buffers in RAM
-PRAGMA mmap_size=536870912;     -- 512 MB memory-mapped I/O
-PRAGMA wal_autocheckpoint=4000; -- checkpoint WAL every ~32 MB
+PRAGMA cache_size=-131072;
+PRAGMA temp_store=MEMORY;
+PRAGMA mmap_size=536870912;
+PRAGMA wal_autocheckpoint=4000;
 ```
 
-A `PRAGMA wal_checkpoint(PASSIVE)` is also run in a background thread after each scan to prevent unbounded WAL growth under concurrent scan workloads.
+The scan monitor runs a WAL checkpoint after completed scans.
+
+## Authentication Model
+
+If `ADMIN_PASSWORD` is empty, the app runs in trusted single-user mode. If set, public pages remain visible but write operations require an admin session.
+
+Protected operations include:
+
+- creating/stopping/deleting scans
+- modifying mount records
+- mounting/unmounting/remounting
+- changing settings
+- managing confirmed users
+
+## Design Tradeoffs
+
+- **Full scans only**: incremental scan mode was removed because it still traversed the whole tree and produced partial snapshots that could mislead analytics.
+- **SQLite over service database**: simple deployment and enough performance for single-host operational workloads.
+- **Server-rendered UI**: no build pipeline, predictable deployment, easy screenshots for documentation.
+- **Subprocess workers**: better control over stuck network filesystem calls than threads.

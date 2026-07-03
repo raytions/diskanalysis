@@ -39,7 +39,7 @@
   <div id="fields-nfs" class="mount-form-grid" style="margin-bottom:.75rem;">
     <div class="mount-form-field">
       <label>NFS Server (host or IP)</label>
-      <input type="text" id="nfs-host" placeholder="192.168.1.100 or nas01.local" oninput="autoFillLocal('nfs');updateMountCmd()" />
+      <input type="text" id="nfs-host" placeholder="storage.example.internal" oninput="autoFillLocal('nfs');updateMountCmd()" />
     </div>
     <div class="mount-form-field">
       <label>Export Path</label>
@@ -51,7 +51,7 @@
     </div>
     <div class="mount-form-field">
       <label>Description (optional)</label>
-      <input type="text" id="nfs-desc" placeholder="NAS01 data share" />
+      <input type="text" id="nfs-desc" placeholder="Research data share" />
     </div>
   </div>
 
@@ -59,7 +59,7 @@
   <div id="fields-smb" class="mount-form-grid" style="display:none;margin-bottom:.75rem;">
     <div class="mount-form-field">
       <label>Server</label>
-      <input type="text" id="smb-server" placeholder="//192.168.1.200" oninput="autoFillLocal('smb');updateMountCmd()" />
+      <input type="text" id="smb-server" placeholder="//files.example.internal/share" oninput="autoFillLocal('smb');updateMountCmd()" />
     </div>
     <div class="mount-form-field">
       <label>Share Name</label>
@@ -91,7 +91,7 @@
     </div>
     <div class="mount-form-field">
       <label>SSH Host</label>
-      <input type="text" id="ssh-host" placeholder="192.168.1.50 or server.local" oninput="sshHeaderChanged();updateMountCmd()" />
+      <input type="text" id="ssh-host" placeholder="ssh.example.internal" oninput="sshHeaderChanged();updateMountCmd()" />
     </div>
     <div class="mount-form-field">
       <label>Server Alias <span style="font-weight:400;color:var(--text-dim)">(optional, used in local path names)</span></label>
@@ -369,7 +369,7 @@ function toggleAddForm() {
   f.style.display = f.style.display === 'none' ? 'block' : 'none';
 }
 
-// Wrap bare IPv6 addresses in [] for NFS/mount syntax (e.g. 2a0c:... → [2a0c:...])
+// Wrap bare IPv6 addresses in [] for NFS/mount syntax.
 function nfsHost(raw) {
   const h = raw.trim();
   if (h.includes(':') && !h.startsWith('[')) return '[' + h + ']';

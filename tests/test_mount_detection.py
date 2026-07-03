@@ -14,7 +14,7 @@ sysfs /sys sysfs rw,nosuid,nodev,noexec,relatime 0 0
 proc /proc proc rw,nosuid,nodev,noexec,relatime 0 0
 /dev/sda1 / ext4 rw,relatime 0 0
 /dev/sda2 /home xfs rw,relatime 0 0
-192.168.1.10:/exports/data /mnt/nas1 nfs4 rw,relatime 0 0
+storage.example.internal:/exports/data /mnt/nas1 nfs4 rw,relatime 0 0
 //fileserver/share /mnt/smb1 cifs rw,relatime 0 0
 tmpfs /tmp tmpfs rw,nosuid,nodev 0 0
 """

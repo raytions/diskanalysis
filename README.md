@@ -1,225 +1,169 @@
 # DiskAnalysis
 
-A self-hosted disk analysis web panel for Linux servers with many NAS mount points.
+Self-hosted disk usage analytics for Linux servers with many local, NAS, NFS, SMB, and SSHFS mount points.
 
-**Architecture:** host-side scanner (Python CLI) + web panel (FastAPI + Jinja2, SQLite).
+DiskAnalysis combines a host-aware scanner with a FastAPI/Jinja web UI. It is built for repeated operational use on research, lab, or homelab storage servers where a single machine may expose dozens of large mount points.
 
----
+![DiskAnalysis dashboard](docs/assets/screenshots/dashboard.png)
 
-## Features
+## Highlights
 
-- **Mount management** — auto-discover system mounts; manually register NFS/SMB/sshfs mounts; live mount status (green/red dot); one-click mount/unmount from the detail page; SSH ControlMaster multi-path commands (single password for multiple sshfs mounts)
-- **Scanning** — full or incremental scan; per-mount, all mounts, or arbitrary path; configurable cold-data threshold and exclude rules; background thread execution with live progress; stop running scans
-- **By File / By Directory** — largest files and directories, sortable and searchable
-- **Cold Data** — files not accessed in N days, filterable by directory prefix
-- **By Extension** — aggregate disk usage by file type
-- **By User** — per-user disk usage with NFS4 uid-squash support; depth-1 and depth-2 directory matching; cached after first computation; pre-warmed automatically after each scan
-- **Settings** — sidebar navigation; confirmed user list with aliases; candidate sync from scan data; path attribution toggle; attribution cache management
-- **Auth** — optional session-based admin authentication
+- **Mount inventory**: discover Linux mounts, track capacity, label mount points, and register custom NFS/SMB/SSHFS entries.
+- **SSHFS operations from the web UI**: create mount directories, mount/unmount, lazy-detach stale FUSE mounts, remount historical SSHFS entries, and record recent mount events.
+- **Full scans with live progress**: scan selected mounts, all accessible mounts, or a specific path. Scans run in subprocess workers so stuck network filesystem calls can be terminated.
+- **Auto Scan**: schedule recurring full scans from the Scans page, with next-run, last-run, skip/failure messages, and active scan visibility.
+- **Scan control**: stop one scan or batch-stop multiple running/queued scans from the UI.
+- **Analytics views**: largest files, largest directories, cold data, extension breakdown, and per-user usage.
+- **NFS/SMB user attribution**: path-based user attribution for uid-squashed filesystems, with confirmed users, aliases, candidates, and cache rebuilds.
+- **Operational UI**: dark mode by default, compact tables, right-click and multi-select actions, and responsive public/admin states.
+- **Optional admin auth**: leave `ADMIN_PASSWORD` empty for trusted single-user deployments, or set it to require login for write operations.
 
----
+## Screenshots
+
+| Dashboard | Mounts |
+|---|---|
+| ![Dashboard](docs/assets/screenshots/dashboard.png) | ![Mounts](docs/assets/screenshots/mounts.png) |
+
+| Scans and Auto Scan | Settings |
+|---|---|
+| ![Scans](docs/assets/screenshots/scans.png) | ![Settings](docs/assets/screenshots/settings.png) |
+
+More screenshot notes: [docs/screenshots.md](docs/screenshots.md).
 
 ## Quick Start
 
-### 1. Install scanner dependencies on the host
+### 1. Prepare the project
 
 ```bash
-# Python 3.14+: no venv available, install system-wide
-pip install -r requirements.txt --break-system-packages
+git clone <your-repo-url> diskanalysis
+cd diskanalysis
 
-# Or with a venv (Python < 3.14)
+cp .env.example .env
+mkdir -p data
+```
+
+Edit `.env` as needed:
+
+```env
+APP_PORT=8000
+DB_PATH=/data/diskanalysis.db
+ADMIN_PASSWORD=
+PATH_USER_ATTRIBUTION=true
+```
+
+### 2. Start the web app
+
+```bash
+docker compose up -d
+```
+
+Open:
+
+```text
+http://localhost:8000
+```
+
+For host-local development:
+
+```bash
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
-
-cp .env.example .env
-# Edit .env — set DB_PATH to a path both the scanner and web container can reach
+uvicorn app.main:app --host 0.0.0.0 --port 8000
 ```
 
-### 2. Run a first scan
+### 3. Run scans
+
+From the web UI:
+
+- Go to **Scans**.
+- Choose **Select Mounts**, **All Mounts**, or **Specific Path**.
+- Click **Start Scan**.
+- Use **Auto Scan** on the same page for recurring full scans.
+
+From the CLI:
 
 ```bash
-# List discovered mounts
-python -m app.scanner mounts
-
-# Health check
 python -m app.scanner doctor
-
-# Scan all mounts
+python -m app.scanner mounts
 python -m app.scanner scan --all-mounts
-
-# Scan one mount
-python -m app.scanner scan --mount /mnt/nas1
-
-# Scan a specific path, 180-day cold threshold
-python -m app.scanner scan --path /mnt/nas1/projectA --cold-days 180
-
-# Exclude paths or globs
-python -m app.scanner scan --mount /mnt/nas1 --exclude /mnt/nas1/.trash,*.tmp
+python -m app.scanner scan --mount /mnt/research-a
+python -m app.scanner scan --path /mnt/research-a/project-alpha --cold-days 180
 ```
 
-### 3. Start the web panel
+## Current Scan Model
 
-```bash
-cp .env.example .env
-mkdir -p data
-docker compose up -d
-# Open: http://localhost:8000
-```
+DiskAnalysis intentionally runs **full scans only**. The previous incremental mode was removed because it still had to traverse the full directory tree and produced partial scan snapshots that could mislead capacity analytics.
 
----
+Each completed scan writes a coherent snapshot for a mount/path:
 
-## Configuration (`.env`)
+- top largest files
+- top cold files
+- directory aggregates
+- extension summaries
+- uid/user summaries
+- scan totals and error counts
 
-| Variable | Default | Description |
-|---|---|---|
-| `APP_PORT` | `8000` | Web panel port |
-| `DB_PATH` | `/data/diskanalysis.db` | SQLite database path |
-| `DEFAULT_COLD_DAYS` | `90` | Default cold-data threshold (days) |
-| `DEFAULT_TOP_N` | `100` | Default result count per tab |
-| `EXCLUDE_PATHS` | `/proc,/sys,/dev,/run,/snap` | Always-excluded paths |
-| `NETWORK_FS_TYPES` | `nfs,nfs4,cifs,smb3,...` | FS types treated as network mounts |
-| `LOG_LEVEL` | `INFO` | Logging verbosity |
-| `PATH_USER_ATTRIBUTION` | `true` | Attribute files by top-level directory name before uid (useful for NFS4 uid-squash). Can also be toggled in the Settings UI. |
-| `ADMIN_PASSWORD` | `` | If set, enables session-based admin auth. Leave empty for open access. |
+## SSHFS Mount Management
 
----
+The Mounts UI supports SSHFS entries with:
 
-## Scheduled Scanning (systemd)
+- password or key-based mount requests
+- optional web-created local mount directories
+- sudo mkdir mode for controlled mount-point creation
+- stale FUSE health checks
+- automatic lazy detach after failed or inaccessible SSHFS mounts
+- remote-path diagnostics when sshfs exits but the mount point is not readable
+- remount actions through context menus and selection menus
+- recent mount event history
 
-```bash
-sudo cp deploy/diskscan.service /etc/systemd/system/
-sudo cp deploy/diskscan.timer /etc/systemd/system/
-# Edit WorkingDirectory and DB_PATH in diskscan.service
-sudo systemctl daemon-reload
-sudo systemctl enable --now diskscan.timer
-sudo systemctl status diskscan.timer
-```
-
-### Cron alternative
-
-```cron
-# /etc/cron.d/diskanalysis
-0 2 * * *   root  cd /opt/diskanalysis && .venv/bin/python -m app.scanner scan --all-mounts
-0 1 * * 0   root  cd /opt/diskanalysis && .venv/bin/python -m app.scanner scan --mount /mnt/nas1 --cold-days 90
-```
-
----
-
-## Reverse Proxy (Nginx)
-
-```nginx
-server {
-    listen 80;
-    server_name diskanalysis.internal;
-    location / {
-        proxy_pass http://127.0.0.1:8000;
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-    }
-}
-```
-
----
-
-## Design Notes
-
-### Why the scanner runs on the host (not in Docker)
-
-The scanner needs direct access to `/proc/mounts`, real filesystem metadata (`atime`, inode, `st_dev`), and must handle permission escalation. Running it in a container requires mounting the entire host filesystem, which is both risky and complicates xdev (filesystem boundary) detection.
-
-**Recommended approach:** run the scanner as root (or a privileged user) on the host via cron/systemd. Share only the SQLite database file with the web container via a bind mount.
-
-### If you must containerise the scanner
-
-```yaml
-volumes:
-  - /:/host:ro
-  - /proc:/proc:ro
-```
-
-Set `SCAN_ROOTS=/host/mnt` in `.env`. Note that `shutil.disk_usage` and `/proc/mounts` paths will differ inside the container.
-
-### NAS mount scanning risks
-
-- **Stale mounts** (NFS): `os.stat` on a stale NFS mount can block for minutes. The scanner catches and logs these errors — a stale mount will appear as inaccessible.
-- **noatime / relatime**: Most Linux systems mount with `relatime` or `noatime`. Cold file data is a best-effort indicator, not an absolute fact.
-- **Permission errors**: Network filesystems may deny access depending on server configuration. Errors are logged per-path and do not abort the scan.
-
-### Why `--one-filesystem` matters
-
-Without xdev protection, scanning `/mnt` on a server with 30 NAS mounts would recursively descend into all of them. `--one-filesystem` (default: on) uses `os.stat().st_dev` to detect filesystem boundaries and skips them. Always leave this on in NAS environments.
-
-### SSH ControlMaster for sshfs multi-path mounts
-
-When a manually-registered sshfs mount has multiple remote paths, the UI generates a single-password mount sequence using SSH ControlMaster:
-
-```bash
-# Enter password once to open a shared background connection:
-ssh -fNM -o StrictHostKeyChecking=no -o ControlPath=/tmp/sshctl-user@host -o ControlPersist=120 user@host
-
-# Mount all paths (no further password needed):
-sshfs -o ControlPath=/tmp/sshctl-user@host user@host:/remote/path1 /local/path1
-sshfs -o ControlPath=/tmp/sshctl-user@host user@host:/remote/path2 /local/path2
-```
-
-### By User — NFS4 uid-squash problem
-
-NFS4 `all_squash` mounts assign a single uid to every file regardless of actual ownership. Path-based attribution (`PATH_USER_ATTRIBUTION=true`) matches top-level directory names against a curated user list (with depth-2 fallback for intermediate container directories), then falls back to uid for unmatched files. Each file is counted exactly once. See [docs/user-attribution.md](docs/user-attribution.md) for details.
-
----
+See [docs/deployment.md](docs/deployment.md) for required host packages and privilege notes.
 
 ## Documentation
 
-- [Architecture](docs/architecture.md) — system design, data flow, why scanner runs on host
-- [Configuration](docs/configuration.md) — full `.env` reference
-- [Scanner CLI](docs/scanner.md) — all scanner commands and flags
-- [Deployment](docs/deployment.md) — Docker, systemd, nginx, reverse proxy
-- [User Attribution](docs/user-attribution.md) — per-user disk usage, NFS4 uid-squash, cache behaviour
-
----
-
-## Running Tests
-
-```bash
-python -m pytest tests/ -v
-```
-
----
+- [Architecture](docs/architecture.md): process model, scanner workers, scheduler, SQLite layout.
+- [Configuration](docs/configuration.md): `.env` settings and UI-backed settings.
+- [Scanner](docs/scanner.md): host CLI commands and scan behavior.
+- [Deployment](docs/deployment.md): Docker, host mode, nginx, systemd/cron, SSHFS prerequisites.
+- [User Attribution](docs/user-attribution.md): directory-name attribution, uid fallback, aliases, cache behavior.
+- [Recent Updates](docs/recent-updates.md): latest product and operational changes.
+- [Screenshots](docs/screenshots.md): screenshot list and refresh commands.
 
 ## Project Structure
 
-```
+```text
 diskanalysis/
 ├── app/
-│   ├── main.py              # FastAPI app entry point + lifespan
-│   ├── config.py            # Settings (pydantic-settings, reads .env)
-│   ├── db.py                # SQLAlchemy engine, WAL mode, migrations
-│   ├── models.py            # ORM models (Mount, Scan, File, Directory, …)
-│   ├── schemas.py           # Pydantic API schemas + ok()/err() helpers
-│   ├── auth.py              # Session-based admin authentication
-│   ├── scanner.py           # CLI entry point (argparse)
-│   ├── api/
-│   │   ├── routes_mounts.py   # /api/mounts/* endpoints
-│   │   ├── routes_scans.py    # /api/scans/* endpoints
-│   │   └── routes_settings.py # /api/settings/* endpoints
-│   ├── services/
-│   │   ├── mounts.py          # Mount discovery from /proc/mounts
-│   │   ├── scanner.py         # Core streaming scanner (batch SQLite inserts)
-│   │   └── analytics.py       # Query helpers + user attribution cache
-│   ├── web/
-│   │   └── routes_pages.py    # Jinja2 page routes
-│   ├── templates/             # HTML templates (Jinja2)
-│   └── static/                # CSS
-├── docs/                      # Detailed documentation
-├── deploy/
-│   ├── diskscan.service
-│   └── diskscan.timer
+│   ├── main.py                  # FastAPI app, startup cleanup, scheduler startup
+│   ├── config.py                # pydantic-settings .env config
+│   ├── db.py                    # SQLAlchemy engine, SQLite WAL, lightweight migrations
+│   ├── models.py                # Mount, Scan, File, Directory, ScanError, settings models
+│   ├── scanner.py               # Host-side CLI entry point
+│   ├── scan_worker.py           # Subprocess scan worker for web-triggered scans
+│   ├── api/                     # JSON API routes
+│   ├── services/                # scanner, analytics, mounts, scheduler
+│   ├── templates/               # Jinja pages
+│   ├── static/                  # CSS
+│   └── web/                     # HTML page routes
+├── docs/
+│   └── assets/screenshots/      # GitHub README screenshots
+├── deploy/                      # systemd timer/service examples
 ├── tests/
-│   ├── test_mount_detection.py
-│   └── test_analytics.py
-├── Dockerfile
 ├── docker-compose.yml
-├── .env.example
+├── Dockerfile
 └── requirements.txt
 ```
+
+## Testing
+
+```bash
+python -m pytest tests/ -q
+```
+
+Current known test debt: three legacy analytics tests expect older return shapes for largest-file/largest-directory helpers. The scan stop tests and mount detection tests pass.
+
+## Operational Notes
+
+- Network filesystems can hang in kernel I/O. Web scans run in subprocesses so stop requests can escalate from SIGTERM to SIGKILL.
+- Cold data depends on filesystem `atime` behavior. `relatime` and `noatime` can make cold-data detection approximate.
+- Public GitHub screenshots in this repository are captured from a sanitized demo database, not production data.

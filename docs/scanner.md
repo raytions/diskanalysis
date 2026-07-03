@@ -1,101 +1,152 @@
-# Scanner CLI Reference
+# Scanner Reference
 
-The scanner runs on the **host machine** (not in Docker). It reads the filesystem and writes results to the SQLite database.
+DiskAnalysis scans filesystems and writes storage aggregates to SQLite. Scans can be started from the web UI, the Auto Scan scheduler, or the host-side CLI.
 
-## Installation
+## Scan Types
 
-```bash
-# Install dependencies (system-wide, no venv required)
-pip install -r requirements.txt --break-system-packages
+DiskAnalysis currently runs **full scans only**.
 
-# Or with a venv (Python < 3.14)
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
+The previous incremental mode was removed because it still traversed the full directory tree, then wrote only changed-file aggregates. That made the latest scan look like a partial snapshot, which was unsafe for capacity dashboards. A scan is now expected to represent a coherent full view of the selected mount/path.
+
+## Web Scans
+
+The Scans page supports:
+
+- selected mounted volumes
+- all accessible mounts
+- a specific path
+- cold-data threshold
+- filesystem boundary protection
+- exclude rules
+- live progress polling
+- single scan stop
+- batch stop for running/queued scans
+- scheduled recurring scans through Auto Scan
+
+Web scans are executed by subprocess workers:
+
+```text
+python -m app.scan_worker <scan_id> <request_json_b64>
 ```
 
-## Commands
+This allows the API to terminate workers that get stuck in network filesystem calls.
 
-### `mounts` — list discovered mounts
+## CLI Usage
+
+Run commands from the project root with the same environment/database used by the web app.
 
 ```bash
+python -m app.scanner doctor
 python -m app.scanner mounts
+python -m app.scanner scan --all-mounts
+python -m app.scanner scan --mount /mnt/research-a
+python -m app.scanner scan --path /mnt/research-a/project-alpha
 ```
 
-Lists all mounts found in `/proc/mounts`, filtered by configured fs types. Shows mount point, fs type, total/used/free bytes, and whether it is a network filesystem.
-
-### `doctor` — health check
+### `doctor`
 
 ```bash
 python -m app.scanner doctor
 ```
 
-Checks database connectivity, mount accessibility, and config validity. Run this first to verify the setup.
+Checks:
 
-### `scan` — run a scan
+- SQLite connectivity
+- mount discovery
+- inaccessible mounts
+- key config values
+
+### `mounts`
 
 ```bash
-# Scan all accessible mounts
-python -m app.scanner scan --all-mounts
-
-# Scan one specific mount point
-python -m app.scanner scan --mount /media/hdd
-
-# Scan a specific directory path
-python -m app.scanner scan --path /media/nas02/projects
-
-# Multiple mounts
-python -m app.scanner scan --mount /media/hdd --mount /media/nas02
+python -m app.scanner mounts
 ```
 
-#### Scan options
+Lists discovered mounts from `/proc/mounts`, including filesystem type, network flag, usage percentage, total size, and free space.
+
+### `scan`
+
+```bash
+python -m app.scanner scan --all-mounts
+python -m app.scanner scan --mount /mnt/research-a
+python -m app.scanner scan --path /mnt/research-a/project-alpha
+```
+
+Options:
 
 | Flag | Default | Description |
 |---|---|---|
-| `--all-mounts` | — | Scan all accessible mounts from `/proc/mounts` |
-| `--mount PATH` | — | Scan a specific mount point (can be repeated) |
-| `--path PATH` | — | Scan a specific directory path (not a mount) |
-| `--cold-days N` | `90` | Mark files not accessed in N days as cold |
-| `--top-n N` | `100` | Max results stored per query |
-| `--one-filesystem` | `true` | Stop at filesystem boundaries (xdev). **Always leave on** for NAS environments. |
-| `--exclude PATH,...` | — | Additional paths or globs to exclude (comma-separated) |
-| `--incremental` | `false` | Only process changed files (compares mtime) |
+| `--all-mounts` | off | Scan all accessible discovered mounts |
+| `--mount PATH` | none | Scan one registered mount point |
+| `--path PATH` | none | Scan an arbitrary path |
+| `--cold-days N` | `DEFAULT_COLD_DAYS` | Mark files not accessed in N days as cold |
+| `--top-n N` | `DEFAULT_TOP_N` | Store top-N result rows |
+| `--exclude PATHS` | none | Comma-separated paths/globs to exclude |
+| `--one-filesystem` | on | Stay within the starting filesystem |
+| `--follow-mounts` | off | Allow crossing filesystem boundaries |
 
-#### Examples
+Examples:
 
 ```bash
-# Scan all mounts, 180-day cold threshold
 python -m app.scanner scan --all-mounts --cold-days 180
-
-# Scan /media/nas02, exclude backup dirs
-python -m app.scanner scan --mount /media/nas02 --exclude /media/nas02/.trash,/media/nas02/backup
-
-# Dry-run: just list what would be scanned
-python -m app.scanner mounts
-
-# Incremental scan (fast, only changed files)
-python -m app.scanner scan --mount /media/hdd --incremental
+python -m app.scanner scan --mount /mnt/archive-b --exclude /mnt/archive-b/.trash,*.tmp
+python -m app.scanner scan --path /mnt/research-a/project-alpha --follow-mounts
 ```
 
-## Scheduled scanning
+## Scanner Output
 
-See [Deployment](deployment.md) for systemd timer and cron setup.
+A completed scan updates:
 
-## Performance notes
+- `scans.total_files`
+- `scans.total_dirs`
+- `scans.total_bytes`
+- `scans.cold_file_count`
+- `scans.cold_total_size_bytes`
+- `scans.error_count`
+- `files` top largest/coldest file rows
+- `directories` aggregate directory rows
+- `scan_ext_summary`
+- `scan_uid_summary`
 
-- The scanner streams files in batches of 500 (`BATCH_SIZE=500`) — it never holds all files in memory.
-- On a 26-mount NFS server with 7.5M files, a full scan takes ~10–20 minutes.
-- Incremental scans are much faster (skip unchanged files by mtime).
-- After each scan, the `directories` table is rebuilt with cumulative sizes — this enables fast "largest directory" queries without scanning the `files` table.
-- After each scan completes, the user attribution cache is automatically rebuilt in a background thread.
-- A WAL checkpoint (`PRAGMA wal_checkpoint(PASSIVE)`) is run after each scan to prevent unbounded WAL growth when running many concurrent scans.
+Errors are recorded in `scan_errors` and do not abort the scan unless the root path cannot be accessed.
 
-## atime / cold data caveats
+## Filesystem Boundary Protection
 
-Most Linux systems mount with `relatime` or `noatime`, which means `atime` is not updated on every read. Cold file detection (`is_cold=1`) is therefore a **best-effort indicator** — a file may appear cold even if it was recently read.
+`--one-filesystem` is enabled by default. It compares `st_dev` values and avoids descending into nested mounts.
 
-For accurate cold detection, the filesystem must be mounted without `noatime`. Check with:
+Keep this enabled when scanning parent directories such as `/media` or `/mnt`. Otherwise one scan can accidentally traverse every mounted NAS volume beneath that directory.
+
+## Exclude Rules
+
+Global excludes come from `EXCLUDE_PATHS`. Per-scan excludes can be supplied from the UI or CLI.
+
+Examples:
+
+```text
+/tmp
+/mnt/research-a/.snapshot
+*.cache
+*.tmp
+```
+
+## Cold Data Caveats
+
+Cold data uses access time (`atime`). Many Linux filesystems use `relatime` or `noatime`, so cold detection is best-effort.
+
+Check mount options with:
 
 ```bash
-cat /proc/mounts | grep noatime
+cat /proc/mounts | grep -E 'relatime|noatime'
 ```
+
+## Stop Behavior
+
+When a scan is stopped:
+
+1. The API sets `scans.stop_requested=true`.
+2. The worker receives SIGTERM if its PID is known.
+3. The worker exits cleanly if it can.
+4. If it does not exit, the monitor escalates to SIGKILL.
+5. The scan is marked `stopped`.
+
+Stopped scans are visible in history but do not replace the latest completed full snapshot.
