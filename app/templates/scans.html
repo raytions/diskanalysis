@@ -84,7 +84,7 @@
 <section class="card scans-run-panel" style="min-width:0;margin-top:1rem;">
   <div style="display:flex;align-items:center;justify-content:space-between;gap:.75rem;margin-bottom:.85rem;">
     <h2 style="margin:0;">Auto Scan</h2>
-    <span class="badge {% if scan_schedule.enabled %}badge-running{% else %}badge-stopped{% endif %}">
+    <span id="schedule-state-badge" class="badge {% if scan_schedule.enabled %}badge-running{% else %}badge-stopped{% endif %}">
       {% if scan_schedule.enabled %}On{% else %}Off{% endif %}
     </span>
   </div>
@@ -143,9 +143,11 @@
     <button class="btn btn-primary" onclick="saveScanSchedule()">Save Auto Scan</button>
     <span id="schedule-msg" style="font-size:.83rem;color:var(--text-dim);margin-left:.5rem;"></span>
   </div>
-  <div class="setting-hint" style="margin-top:.7rem;">
-    Next: {{ scan_schedule.next_run_at or 'not scheduled' }}
-    {% if scan_schedule.last_started_at %} · Last: {{ scan_schedule.last_started_at }}{% endif %}
+  <div class="setting-hint" id="schedule-runtime" style="margin-top:.7rem;line-height:1.55;">
+    <div>Next: <span id="schedule-next">{{ scan_schedule.next_run_at or 'not scheduled' }}</span> <span id="schedule-countdown"></span></div>
+    <div>Last: <span id="schedule-last">{{ scan_schedule.last_started_at or 'never' }}</span></div>
+    <div>Status: <span id="schedule-message">{{ scan_schedule.last_message or ('Waiting for next scheduled run' if scan_schedule.enabled else 'Scheduled scans are disabled') }}</span></div>
+    <div id="schedule-active" style="display:none;"></div>
   </div>
 </section>
 </div>
@@ -213,6 +215,8 @@
 
 <script>
 const CAN_ADMIN = {{ 'true' if can_admin else 'false' }};
+let _reloadingForNewScan = false;
+let _activePollTimer = null;
 
 // ── Scan form ────────────────────────────────────────────
 function onModeChange() {
@@ -327,6 +331,53 @@ async function saveScanSchedule() {
   } catch(e) {
     msg.style.color = 'var(--danger)';
     msg.textContent = e.message;
+  }
+}
+
+function _fmtLocalTime(value) {
+  if (!value) return 'not scheduled';
+  const d = new Date(value);
+  if (!d.getTime()) return value;
+  return d.toLocaleString();
+}
+
+function _fmtCountdown(serverNow, nextRun) {
+  if (!nextRun) return '';
+  const now = serverNow ? new Date(serverNow).getTime() : Date.now();
+  const next = new Date(nextRun).getTime();
+  if (!now || !next) return '';
+  const seconds = Math.max(0, Math.round((next - now) / 1000));
+  if (seconds <= 0) return '(due now)';
+  if (seconds >= 86400) return '(in ' + (seconds / 86400).toFixed(1) + 'd)';
+  if (seconds >= 3600) return '(in ' + (seconds / 3600).toFixed(1) + 'h)';
+  if (seconds >= 60) return '(in ' + Math.ceil(seconds / 60) + 'm)';
+  return '(in ' + seconds + 's)';
+}
+
+function _renderScheduleStatus(data) {
+  const badge = document.getElementById('schedule-state-badge');
+  if (badge) {
+    badge.textContent = data.enabled ? 'On' : 'Off';
+    badge.className = 'badge ' + (data.enabled ? 'badge-running' : 'badge-stopped');
+  }
+  const next = document.getElementById('schedule-next');
+  const countdown = document.getElementById('schedule-countdown');
+  const last = document.getElementById('schedule-last');
+  const msg = document.getElementById('schedule-message');
+  const active = document.getElementById('schedule-active');
+  if (next) next.textContent = _fmtLocalTime(data.next_run_at);
+  if (countdown) countdown.textContent = data.enabled ? _fmtCountdown(data.server_now, data.next_run_at) : '';
+  if (last) last.textContent = data.last_started_at ? _fmtLocalTime(data.last_started_at) : 'never';
+  if (msg) msg.textContent = data.last_message || (data.enabled ? 'Waiting for next scheduled run' : 'Scheduled scans are disabled');
+  if (active) {
+    const scans = data.active_scans || [];
+    if (scans.length) {
+      active.style.display = '';
+      active.innerHTML = 'Active now: ' + scans.map(s => '<a href="/scans/' + s.id + '">#' + s.id + '</a> ' + (s.target_path || '') + ' (' + s.status + ')').join(', ');
+    } else {
+      active.style.display = 'none';
+      active.textContent = '';
+    }
   }
 }
 
@@ -454,6 +505,18 @@ const _activeIds = new Set(
     .filter(r => r.querySelector('.badge-running, .badge-queued'))
     .map(r => parseInt(r.dataset.id))
 );
+const _knownScanIds = new Set(
+  [...document.querySelectorAll('#scans-tbody tr[data-id]')]
+    .map(r => parseInt(r.dataset.id))
+);
+
+function _scheduleActivePoll(delay) {
+  if (_activePollTimer) return;
+  _activePollTimer = setTimeout(() => {
+    _activePollTimer = null;
+    _pollActive();
+  }, delay);
+}
 
 function _applyRow(scan) {
   const row = document.querySelector(`#scans-tbody tr[data-id="${scan.id}"]`);
@@ -491,12 +554,18 @@ function _applyRow(scan) {
 }
 
 async function _pollActive() {
-  if (_activeIds.size === 0) return;
   try {
     const r = await fetch('/api/scans?status=active&limit=200');
     const j = await r.json();
     if (!j.ok) return;
     const nowActive = new Set(j.data.items.map(s => s.id));
+    const unseenActive = j.data.items.find(s => !_knownScanIds.has(s.id));
+    if (unseenActive && !_reloadingForNewScan) {
+      _reloadingForNewScan = true;
+      location.reload();
+      return;
+    }
+    for (const id of nowActive) _activeIds.add(id);
     for (const scan of j.data.items) {
       if (_activeIds.has(scan.id)) _applyRow(scan);
     }
@@ -510,10 +579,32 @@ async function _pollActive() {
       _activeIds.delete(id);
     }
   } catch(e) { /* ignore transient network errors */ }
-  if (_activeIds.size > 0) setTimeout(_pollActive, 3000);
+  if (_activeIds.size > 0) _scheduleActivePoll(3000);
 }
 
-if (_activeIds.size > 0) setTimeout(_pollActive, 3000);
+async function _pollScheduleStatus() {
+  try {
+    const r = await fetch('/api/settings/scan-schedule');
+    const j = await r.json();
+    if (j.ok) {
+      _renderScheduleStatus(j.data);
+      const unseenActive = (j.data.active_scans || []).find(s => !_knownScanIds.has(s.id));
+      if (unseenActive && !_reloadingForNewScan) {
+        _reloadingForNewScan = true;
+        location.reload();
+        return;
+      }
+      for (const s of (j.data.active_scans || [])) {
+        if (_knownScanIds.has(s.id)) _activeIds.add(s.id);
+      }
+      if (_activeIds.size > 0) _scheduleActivePoll(250);
+    }
+  } catch(e) { /* ignore transient network errors */ }
+  setTimeout(_pollScheduleStatus, 5000);
+}
+
+_scheduleActivePoll(3000);
+setTimeout(_pollScheduleStatus, 1000);
 onScheduleModeChange();
 </script>
 {% endblock %}

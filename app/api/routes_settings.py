@@ -76,6 +76,9 @@ def get_scan_schedule(conn) -> dict:
         "cold_days": cold_days,
         "next_run_at": get_setting(conn, "scan_schedule_next_run_at", ""),
         "last_started_at": get_setting(conn, "scan_schedule_last_started_at", ""),
+        "last_checked_at": get_setting(conn, "scan_schedule_last_checked_at", ""),
+        "last_status": get_setting(conn, "scan_schedule_last_status", ""),
+        "last_message": get_setting(conn, "scan_schedule_last_message", ""),
     }
 
 
@@ -174,10 +177,44 @@ def update_scan_schedule(req: ScanScheduleRequest, request: Request,
         set_setting(conn, "scan_schedule_exclude_rules", req.exclude_rules.strip())
         set_setting(conn, "scan_schedule_cold_days", str(cold_days))
         set_setting(conn, "scan_schedule_next_run_at", next_run)
+        set_setting(conn, "scan_schedule_last_status", "scheduled" if req.enabled else "disabled")
+        set_setting(
+            conn,
+            "scan_schedule_last_message",
+            f"Next scan scheduled for {next_run}" if req.enabled else "Scheduled scans are disabled",
+        )
         conn.commit()
 
     with db.bind.connect() as conn:
         data = get_scan_schedule(conn)
+    return ok(data)
+
+
+@router.get("/scan-schedule")
+def read_scan_schedule(db: Session = Depends(get_db)):
+    from datetime import datetime
+    from app.models import Scan
+    with db.bind.connect() as conn:
+        data = get_scan_schedule(conn)
+    active = (
+        db.query(Scan)
+        .filter(Scan.status.in_(["running", "queued"]))
+        .order_by(Scan.started_at.desc())
+        .limit(200)
+        .all()
+    )
+    data["server_now"] = datetime.now().isoformat(timespec="seconds")
+    data["active_scans"] = [
+        {
+            "id": s.id,
+            "status": s.status,
+            "target_path": s.target_path,
+            "started_at": s.started_at.isoformat() if s.started_at else None,
+            "total_files": s.total_files or 0,
+            "total_bytes": s.total_bytes or 0,
+        }
+        for s in active
+    ]
     return ok(data)
 
 

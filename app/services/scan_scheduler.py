@@ -53,14 +53,34 @@ def _tick() -> None:
         )).fetchone()[0]
         if active:
             logger.info("Scheduled scan skipped because %d scan(s) are active", active)
+            _store_schedule_status(
+                db,
+                "skipped_active",
+                f"Skipped because {active} scan(s) are already active.",
+                checked_at=now,
+            )
             _store_next_run(db, schedule["interval_minutes"])
             return
 
         req = _build_request(schedule)
-        create_scan(req, None, db, None)
+        try:
+            create_scan(req, None, db, None)
+        except Exception as exc:
+            _store_schedule_status(
+                db,
+                "failed",
+                f"Failed to start scheduled scan: {exc}",
+                checked_at=now,
+            )
+            _store_next_run(db, schedule["interval_minutes"])
+            logger.warning("Scheduled scan failed to start: %s", exc)
+            return
 
         with db.bind.connect() as conn:
             set_setting(conn, "scan_schedule_last_started_at", now.isoformat(timespec="seconds"))
+            set_setting(conn, "scan_schedule_last_checked_at", now.isoformat(timespec="seconds"))
+            set_setting(conn, "scan_schedule_last_status", "started")
+            set_setting(conn, "scan_schedule_last_message", f"Started scheduled scan at {now.isoformat(timespec='seconds')}.")
             conn.commit()
         _store_next_run(db, schedule["interval_minutes"])
         logger.info("Scheduled scan started: mode=%s interval=%dm",
@@ -84,6 +104,17 @@ def _store_next_run(db, interval_minutes: int) -> None:
     next_run = (datetime.now() + timedelta(minutes=interval_minutes)).isoformat(timespec="seconds")
     with db.bind.connect() as conn:
         set_setting(conn, "scan_schedule_next_run_at", next_run)
+        conn.commit()
+
+
+def _store_schedule_status(db, status: str, message: str, checked_at: datetime | None = None) -> None:
+    from app.api.routes_settings import set_setting
+
+    checked = checked_at or datetime.now()
+    with db.bind.connect() as conn:
+        set_setting(conn, "scan_schedule_last_checked_at", checked.isoformat(timespec="seconds"))
+        set_setting(conn, "scan_schedule_last_status", status)
+        set_setting(conn, "scan_schedule_last_message", message)
         conn.commit()
 
 
