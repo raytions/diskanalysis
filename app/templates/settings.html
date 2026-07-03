@@ -417,6 +417,7 @@
 .sel-table tbody tr.selectable-row:hover { background: var(--surface2); }
 .sel-table tbody tr.row-selected { background: #dbeafe !important; }
 [data-theme="dark"] .sel-table tbody tr.row-selected { background: #1e3a5f !important; }
+[data-theme="termix"] .sel-table tbody tr.row-selected { background: rgba(245,145,69,.16) !important; }
 
 /* ── Selection bar ── */
 .sel-bar {
@@ -434,6 +435,8 @@
 .sel-bar .btn:hover { background:rgba(255,255,255,.3); }
 .sel-bar .btn-danger { background:rgba(220,38,38,.8); border-color:rgba(220,38,38,.9); }
 .sel-bar-candidates { background: #059669; }
+[data-theme="termix"] .sel-bar { color:#171613; box-shadow:0 12px 28px rgba(245,145,69,.18); }
+[data-theme="termix"] .sel-bar-candidates { background: #8fd46d; }
 
 /* ── Alias panel ── */
 .alias-panel {
@@ -456,7 +459,7 @@
   border-radius: 999px;
   color: var(--text-dim);
   margin-right: .2rem;
-  font-family: monospace;
+  font-family: var(--font-mono);
 }
 
 /* ── Fixed-height user tables ── */
