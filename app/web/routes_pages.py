@@ -1,4 +1,6 @@
 import logging
+import subprocess
+import sys
 from fastapi import APIRouter, Depends, Form, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
@@ -39,6 +41,26 @@ def _decode_proc_mount_field(value: str) -> str:
         return bytes(value, "utf-8").decode("unicode_escape")
     except UnicodeDecodeError:
         return value
+
+
+def _quick_path_health(path: str, timeout: float = 1.5) -> bool:
+    probe = (
+        "import os,sys\n"
+        "try:\n"
+        "    os.stat(sys.argv[1])\n"
+        "except OSError:\n"
+        "    sys.exit(2)\n"
+    )
+    try:
+        result = subprocess.run(
+            [sys.executable, "-c", probe, path],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired:
+        return False
+    return result.returncode == 0
 
 
 def _fmt_duration(s: float | None) -> str:
@@ -101,6 +123,17 @@ def mounts_page(
 
     all_fs_types = sorted({m.fs_type for m in db.query(Mount).all()})
     mounted_paths = _get_mounted_paths()
+    stale_paths = set()
+    live_updated = False
+    for mount in mounts:
+        if mount.fs_type == "fuse.sshfs" and mount.mount_point in mounted_paths:
+            if not _quick_path_health(mount.mount_point):
+                stale_paths.add(mount.mount_point)
+                if mount.is_accessible:
+                    mount.is_accessible = False
+                    live_updated = True
+    if live_updated:
+        db.commit()
     with db.bind.connect() as conn:
         indexed_rows = conn.execute(text("""
             SELECT s.mount_id, s.total_bytes
@@ -121,6 +154,7 @@ def mounts_page(
         "fs_type": fs_type,
         "is_network": is_network,
         "mounted_paths": mounted_paths,
+        "stale_paths": stale_paths,
         "indexed_bytes": indexed_bytes,
         "mount_events": list_mount_events(db, limit=12),
     })

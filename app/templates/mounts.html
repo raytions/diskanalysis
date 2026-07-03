@@ -250,7 +250,10 @@
   </thead>
   <tbody id="mounts-tbody">
     {% for m in mounts %}
-    {% set is_mounted = m.mount_point in mounted_paths %}
+    {% set in_mount_table = m.mount_point in mounted_paths %}
+    {% set live_stale = m.mount_point in stale_paths %}
+    {% set is_mounted = in_mount_table and m.is_accessible and not live_stale %}
+    {% set is_stale = in_mount_table and (not m.is_accessible or live_stale) %}
     {% set indexed_size = indexed_bytes.get(m.id) %}
     <tr data-selectable data-id="{{ m.id }}"
         data-mount_point="{{ m.mount_point }}"
@@ -269,6 +272,7 @@
             {% else %}<strong>{{ m.mount_point }}</strong>{% endif %}
           </span>
           {% if m.is_network_fs %}<span class="badge badge-net" style="flex-shrink:0;">NAS</span>{% endif %}
+          {% if is_stale %}<span class="badge badge-failed" style="flex-shrink:0;" title="Present in mount table but not accessible">Stale</span>{% endif %}
         </div>
       </td>
       <td class="dimmed" title="{{ m.device }}"><div class="mnt-dev-cell">{{ m.device }}</div></td>

@@ -5,6 +5,7 @@ import logging
 import os
 import shutil
 import subprocess
+import sys
 import threading
 import time
 from typing import Annotated
@@ -400,6 +401,33 @@ def _create_mount_dir(path: str, use_sudo: bool, db: Session) -> tuple[bool, str
         return False, err, cmd_display
 
 
+def _path_health(path: str, timeout: float = 3.0) -> tuple[bool, str]:
+    """Probe path in a subprocess so broken FUSE mounts cannot hang the API worker."""
+    probe = (
+        "import os,sys\n"
+        "p=sys.argv[1]\n"
+        "try:\n"
+        "    os.stat(p)\n"
+        "    os.listdir(p)\n"
+        "    print('ok')\n"
+        "except OSError as e:\n"
+        "    print(f'errno={e.errno} {e.strerror}')\n"
+        "    sys.exit(2)\n"
+    )
+    try:
+        result = subprocess.run(
+            [sys.executable, "-c", probe, path],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired:
+        return False, f"Path health check timed out after {timeout:.0f}s"
+    if result.returncode == 0:
+        return True, "ok"
+    return False, (result.stdout or result.stderr or "Path health check failed").strip()
+
+
 @router.post("/mounts/mount-ssh")
 def mount_ssh_fs(req: SSHMountRequest, request: Request, db: Session = Depends(get_db), _: None = Depends(auth.require_admin)):
     """Attempt to mount a remote SSH path via sshfs. Returns the sshfs command regardless."""
@@ -418,14 +446,32 @@ def mount_ssh_fs(req: SSHMountRequest, request: Request, db: Session = Depends(g
     cmd_parts = ["sshfs"] + opts + [remote, local]
     cmd_display = " ".join(cmd_parts)
 
-    # Already mounted?
-    if _check_proc_mounts(local):
+    # Already mounted? A stale FUSE mount can remain in /proc/mounts while every
+    # access returns EIO, so verify real access before reporting success.
+    existing_fs = _check_proc_mounts(local)
+    if existing_fs:
+        healthy, health_msg = _path_health(local)
+        if healthy:
+            log_mount_event(
+                db, mount_point=local, event_type="mount", status="ok",
+                message="SSHFS mount already exists and is accessible.", command=cmd_display,
+                details={"remote": remote, "already": True, "fs_type": existing_fs},
+            )
+            return ok({"mounted": True, "already": True, "fs_type": existing_fs, "command": cmd_display})
+        unmounted, unmount_msg = _try_unmount(local, lazy=True)
         log_mount_event(
-            db, mount_point=local, event_type="mount", status="ok",
-            message="SSHFS mount already exists.", command=cmd_display,
-            details={"remote": remote, "already": True},
+            db, mount_point=local, event_type="unmount",
+            status="ok" if unmounted else "failed",
+            message=f"Stale SSHFS mount detected ({health_msg}); lazy unmount: {unmount_msg}",
+            command=cmd_display,
+            details={"remote": remote, "fs_type": existing_fs},
         )
-        return ok({"mounted": True, "already": True, "command": cmd_display})
+        if not unmounted:
+            return ok({
+                "mounted": False,
+                "error": f"Existing SSHFS mount is stale ({health_msg}) and could not be unmounted: {unmount_msg}",
+                "command": cmd_display,
+            })
 
     # Create local directory
     mkdir_command = ""
@@ -477,13 +523,19 @@ def mount_ssh_fs(req: SSHMountRequest, request: Request, db: Session = Depends(g
         result = subprocess.run(full_cmd, capture_output=True, text=True, timeout=30, env=env)
         if result.returncode == 0:
             mounted_fs = None
+            health_msg = ""
             for _ in range(10):
                 mounted_fs = _check_proc_mounts(local)
                 if mounted_fs:
-                    break
+                    healthy, health_msg = _path_health(local, timeout=2.0)
+                    if healthy:
+                        break
+                    mounted_fs = None
+                else:
+                    health_msg = "not present in /proc/mounts"
                 time.sleep(0.3)
             if not mounted_fs:
-                msg = "sshfs exited successfully, but the mount point did not appear in /proc/mounts."
+                msg = "sshfs exited successfully, but the mount point is not accessible: " + health_msg
                 log_mount_event(db, mount_point=local, event_type="mount", status="failed",
                                 message=msg, command=cmd_display,
                                 details={"remote": remote, "mkdir_command": mkdir_command})
@@ -548,7 +600,11 @@ def test_mount_path(path: str, db: Session = Depends(get_db)):
     """Test whether a local path is accessible and return disk stats."""
     fs_type_in_proc = _check_proc_mounts(path)
     is_mounted = fs_type_in_proc is not None
-    accessible = os.path.isdir(path)
+    health_ok = True
+    health_msg = ""
+    if is_mounted:
+        health_ok, health_msg = _path_health(path)
+    accessible = health_ok and os.path.isdir(path)
     result = {
         "path": path, "accessible": accessible, "is_mounted": is_mounted,
         "fs_type": fs_type_in_proc, "total_bytes": 0, "used_bytes": 0, "free_bytes": 0,
@@ -560,10 +616,8 @@ def test_mount_path(path: str, db: Session = Depends(get_db)):
         except OSError:
             result["accessible"] = False
     elif is_mounted:
-        # Mounted (visible in /proc/mounts) but not readable by this process
-        # — typically a root-mounted FUSE with no allow_other
-        result["accessible"] = True
-        result["warn"] = "Mounted but not readable by the web server process. If mounted as root, re-mount as the same user as the web server, or add -o allow_other to the sshfs options."
+        result["stale"] = True
+        result["warn"] = health_msg or "Mounted in /proc/mounts but not accessible."
     return ok(result)
 
 
@@ -643,18 +697,26 @@ def add_mount(req: MountAddRequest, request: Request, db: Session = Depends(get_
         return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
 
 
-def _try_unmount(mount_point: str) -> tuple[bool, str]:
+def _try_unmount(mount_point: str, lazy: bool = False) -> tuple[bool, str]:
     """Best-effort unmount. Returns (success, message). Never raises."""
     try:
         for tool in filter(None, [shutil.which("fusermount3"), shutil.which("fusermount")]):
-            r = subprocess.run([tool, "-u", mount_point], capture_output=True, text=True, timeout=15)
+            args = [tool, "-u"]
+            if lazy:
+                args.append("-z")
+            args.append(mount_point)
+            r = subprocess.run(args, capture_output=True, text=True, timeout=15)
             if r.returncode == 0:
-                return True, "fusermount"
+                return True, "fusermount lazy" if lazy else "fusermount"
         umount = shutil.which("umount")
         if umount:
-            r = subprocess.run([umount, mount_point], capture_output=True, text=True, timeout=15)
+            args = [umount]
+            if lazy:
+                args.append("-l")
+            args.append(mount_point)
+            r = subprocess.run(args, capture_output=True, text=True, timeout=15)
             if r.returncode == 0:
-                return True, "umount"
+                return True, "umount lazy" if lazy else "umount"
             return False, (r.stderr or r.stdout or "umount failed").strip()
         return False, "No unmount tool found"
     except Exception as e:
