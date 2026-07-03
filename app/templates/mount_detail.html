@@ -14,7 +14,7 @@
     </div>
   </div>
   <div class="header-actions">
-    <button id="scan-this-btn" class="btn btn-primary" onclick="scanThis()"><svg class="icon"><use href="#i-play"/></svg> Scan This</button>
+    <button id="scan-this-btn" class="btn btn-primary" onclick="scanThis()">Scan This</button>
     {% if not auth_enabled or is_admin %}
     <button class="btn" id="mount-action-btn" onclick="mountActionClick()" style="min-width:90px;">…</button>
     {% endif %}
@@ -655,11 +655,11 @@ async function scanThis() {
       window.location.href = '/scans/' + j.data.id;
     } else {
       alert('Failed to start scan: ' + (j.error || 'unknown'));
-      btn.disabled = false; btn.innerHTML = '<svg class="icon"><use href="#i-play"/></svg> Scan This';
+      btn.disabled = false; btn.textContent = 'Scan This';
     }
   } catch(e) {
     alert('Error: ' + e.message);
-    btn.disabled = false; btn.innerHTML = '<svg class="icon"><use href="#i-play"/></svg> Scan This';
+    btn.disabled = false; btn.textContent = 'Scan This';
   }
 }
 

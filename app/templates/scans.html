@@ -74,7 +74,7 @@
     </div>
 
     <div class="form-actions">
-      <button type="submit" class="btn btn-primary" id="submit-btn"><svg class="icon"><use href="#i-play"/></svg> Start Scan</button>
+      <button type="submit" class="btn btn-primary" id="submit-btn">Start Scan</button>
       <span id="status-msg" style="font-size:.83rem;color:var(--text-dim);margin-left:.5rem;"></span>
     </div>
   </form>
@@ -158,7 +158,7 @@
     <h2 style="margin:0;">Scan History</h2>
     {% if can_admin %}
     <span id="hist-sel-label" style="font-size:.82rem;color:var(--text-dim);margin-left:auto;visibility:hidden;"></span>
-    <button id="hist-sel-stop" class="btn btn-danger btn-sm" style="display:none;" onclick="stopHistSel()"><svg class="icon"><use href="#i-stop"/></svg> Stop</button>
+    <button id="hist-sel-stop" class="btn btn-danger btn-sm" style="display:none;" onclick="stopHistSel()">Stop</button>
     <button id="hist-sel-delete" class="btn btn-danger btn-sm" style="display:none;" onclick="deleteHistSel()">Delete</button>
     {% endif %}
   </div>
@@ -249,12 +249,12 @@ async function submitScan(e) {
 
   if (mode === 'selected_mounts') {
     const ids = [...document.querySelectorAll('#mount-list input[type=checkbox]:checked')].map(cb => parseInt(cb.value));
-    if (!ids.length) { showScanErr('Select at least one mount'); btn.disabled = false; btn.innerHTML = '<svg class="icon"><use href="#i-play"/></svg> Start Scan'; return; }
+    if (!ids.length) { showScanErr('Select at least one mount'); btn.disabled = false; btn.textContent = 'Start Scan'; return; }
     data.mount_ids = ids;
   }
   if (mode === 'path') {
     const p = form.target_path.value.trim();
-    if (!p) { showScanErr('Enter a target path'); btn.disabled = false; btn.innerHTML = '<svg class="icon"><use href="#i-play"/></svg> Start Scan'; return; }
+    if (!p) { showScanErr('Enter a target path'); btn.disabled = false; btn.textContent = 'Start Scan'; return; }
     data.target_path = p;
   }
 
@@ -270,11 +270,11 @@ async function submitScan(e) {
       }
     } else {
       showScanErr('Error: ' + (j.error || r.status));
-      btn.disabled = false; btn.innerHTML = '<svg class="icon"><use href="#i-play"/></svg> Start Scan';
+      btn.disabled = false; btn.textContent = 'Start Scan';
     }
   } catch(err) {
     showScanErr('Request failed: ' + err.message);
-    btn.disabled = false; btn.innerHTML = '<svg class="icon"><use href="#i-play"/></svg> Start Scan';
+    btn.disabled = false; btn.textContent = 'Start Scan';
   }
 }
 

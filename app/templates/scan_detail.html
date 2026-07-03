@@ -10,7 +10,7 @@
   <div style="display:flex;align-items:center;gap:.75rem;">
     <span id="status-badge" class="badge badge-{{ scan.status }} badge-lg">{{ scan.status }}</span>
     {% if scan.status in ("running", "queued") and (not auth_enabled or is_admin) %}
-    <button id="stop-btn" class="btn btn-danger" onclick="stopScan()"><svg class="icon"><use href="#i-stop"/></svg> Stop</button>
+    <button id="stop-btn" class="btn btn-danger" onclick="stopScan()">Stop</button>
     {% endif %}
   </div>
 </div>
@@ -126,7 +126,7 @@ if (status === 'running' || status === 'queued') {
         if (stopArea && !document.getElementById('stop-btn')) {
           const btn = document.createElement('button');
           btn.id = 'stop-btn'; btn.className = 'btn btn-danger';
-          btn.innerHTML = '<svg class="icon"><use href="#i-stop"/></svg> Stop';
+          btn.textContent = 'Stop';
           btn.onclick = stopScan;
           stopArea.appendChild(btn);
         }
@@ -200,11 +200,11 @@ async function stopScan() {
     const j = await r.json();
     if (!j.ok) {
       alert('Error: ' + (j.error || r.status));
-      btn.disabled = false; btn.textContent = '■ Stop';
+      btn.disabled = false; btn.textContent = 'Stop';
     }
   } catch(e) {
     alert('Error: ' + e.message);
-    btn.disabled = false; btn.textContent = '■ Stop';
+    btn.disabled = false; btn.textContent = 'Stop';
   }
 }
 </script>
