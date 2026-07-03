@@ -454,6 +454,7 @@ function showDelToast(msg) {
 
 // ── Mount state ──────────────────────────────────────────
 let _isMounted = null;
+let _isStale = false;
 
 async function checkMountState() {
   const btn = document.getElementById('mount-action-btn');
@@ -462,9 +463,11 @@ async function checkMountState() {
     const r = await fetch('/api/mounts/test-path?path=' + encodeURIComponent(MOUNT_POINT));
     const j = await r.json();
     const d = j.data;
-    _isMounted = d.is_mounted;
+    _isStale = !!d.stale || (!!d.is_mounted && !d.accessible);
+    _isMounted = !!d.is_mounted && !!d.accessible && !_isStale;
   } catch(e) {
-    _isMounted = true; // assume mounted if check fails
+    _isMounted = false;
+    _isStale = true;
   }
   applyMountState();
 }
@@ -480,6 +483,12 @@ function applyMountState() {
     btn.disabled = false;
     if (badge) badge.style.display = 'none';
     if (panel) panel.style.display = 'none';
+  } else if (_isStale) {
+    btn.textContent = 'Unmount Stale';
+    btn.className = 'btn btn-danger';
+    btn.disabled = false;
+    if (badge) { badge.textContent = 'Stale'; badge.className = 'badge badge-danger'; badge.style.display = ''; }
+    if (panel) showRemountPanel();
   } else {
     btn.textContent = 'Mount';
     btn.className = 'btn btn-primary';
@@ -523,7 +532,7 @@ function copyRemountCmd() {
 }
 
 function mountActionClick() {
-  if (_isMounted) {
+  if (_isMounted || _isStale) {
     unmountThis();
   } else {
     if (MOUNT_FS_TYPE === 'fuse.sshfs') {
@@ -533,6 +542,29 @@ function mountActionClick() {
       showRemountPanel();
     }
   }
+}
+
+function parseSshDevice(device) {
+  const atIdx = device.indexOf('@');
+  if (atIdx <= 0) return null;
+  const username = device.slice(0, atIdx);
+  const rest = device.slice(atIdx + 1);
+  if (rest.startsWith('[')) {
+    const closeIdx = rest.indexOf(']');
+    if (closeIdx <= 0 || rest[closeIdx + 1] !== ':') return null;
+    return {
+      username,
+      host: rest.slice(1, closeIdx),
+      remotePath: rest.slice(closeIdx + 2) || '/',
+    };
+  }
+  const colonIdx = rest.indexOf(':');
+  if (colonIdx <= 0) return null;
+  return {
+    username,
+    host: rest.slice(0, colonIdx),
+    remotePath: rest.slice(colonIdx + 1) || '/',
+  };
 }
 
 function toggleRemountAuth() {
@@ -547,18 +579,8 @@ async function doRemountSSH() {
   const keyPath = authType === 'key' ? (document.getElementById('remount-keypath')?.value?.trim() || '') : '';
   const msg = document.getElementById('remount-msg');
 
-  // Parse device: user@host:/path
-  let username = '', host = '', remotePath = '/';
-  const atIdx = MOUNT_DEVICE.indexOf('@');
-  if (atIdx > -1) {
-    username = MOUNT_DEVICE.slice(0, atIdx);
-    const rest = MOUNT_DEVICE.slice(atIdx + 1);
-    const colonIdx = rest.indexOf(':');
-    if (colonIdx > -1) { host = rest.slice(0, colonIdx); remotePath = rest.slice(colonIdx + 1) || '/'; }
-    else { host = rest; }
-  }
-
-  if (!username || !host) { msg.style.color='var(--danger)'; msg.textContent = '✗ Cannot parse device: ' + MOUNT_DEVICE; return; }
+  const parsed = parseSshDevice(MOUNT_DEVICE);
+  if (!parsed) { msg.style.color='var(--danger)'; msg.textContent = '✗ Cannot parse device: ' + MOUNT_DEVICE; return; }
 
   msg.style.color = 'var(--text-dim)'; msg.textContent = 'Mounting…';
   const btn = document.querySelector('#remount-ssh .btn');
@@ -566,12 +588,22 @@ async function doRemountSSH() {
   try {
     const r = await fetch('/api/mounts/mount-ssh', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({ username, host, remote_path: remotePath, local_path: MOUNT_POINT, port: 22, password, key_path: keyPath }),
+      body: JSON.stringify({
+        username: parsed.username,
+        host: parsed.host,
+        remote_path: parsed.remotePath,
+        local_path: MOUNT_POINT,
+        port: 22,
+        password,
+        key_path: keyPath,
+        create_local_dir: true,
+      }),
     });
     const j = await r.json();
     if (j.ok && (j.data.mounted || j.data.already)) {
       msg.style.color = 'var(--green)'; msg.textContent = '✓ Mounted';
       _isMounted = true;
+      _isStale = false;
       setTimeout(() => { applyMountState(); location.reload(); }, 700);
     } else {
       const err = (j.data && j.data.error) || j.error || 'mount failed';
@@ -584,13 +616,15 @@ async function doRemountSSH() {
 async function unmountThis() {
   const btn = document.getElementById('mount-action-btn');
   if (!btn) return;
-  if (!confirm('Unmount ' + MOUNT_POINT + '?\n\nOnly works for mounts made by the same user as the web server.')) return;
+  const actionName = _isStale ? 'Detach stale mount ' : 'Unmount ';
+  if (!confirm(actionName + MOUNT_POINT + '?\n\nFor stale sshfs mounts this uses a lazy FUSE unmount.')) return;
   btn.disabled = true; btn.textContent = 'Unmounting…';
   try {
     const r = await fetch('/api/mounts/' + MOUNT_ID + '/unmount', {method:'POST'});
     const j = await r.json();
     if (j.data && j.data.unmounted) {
       _isMounted = false;
+      _isStale = false;
       applyMountState();
     } else {
       const err = (j.data && j.data.error) || 'unknown';

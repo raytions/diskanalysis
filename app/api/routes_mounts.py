@@ -434,7 +434,7 @@ def _wait_unmounted_and_healthy(path: str, timeout: float = 6.0) -> tuple[bool, 
     while time.monotonic() < deadline:
         fs_type = _check_proc_mounts(path)
         healthy, health_msg = _path_health(path, timeout=1.0)
-        if not fs_type and healthy:
+        if not fs_type and (healthy or "errno=2" in health_msg):
             return True, "ready"
         last_msg = f"fs_type={fs_type or 'none'}, health={health_msg}"
         time.sleep(0.35)
@@ -758,15 +758,20 @@ def unmount_fs(mount_id: int, request: Request, db: Session = Depends(get_db), _
         log_mount_event(db, mount_id=m.id, mount_point=m.mount_point, event_type="unmount",
                         status="warning", message="Unmount requested but mount point is not currently mounted.")
         return ok({"unmounted": False, "error": "Not currently mounted"})
-    success, msg = _try_unmount(m.mount_point)
+    healthy, health_msg = _path_health(m.mount_point, timeout=2.0)
+    lazy = "fuse" in fs_type.lower() and not healthy
+    success, msg = _try_unmount(m.mount_point, lazy=lazy)
+    if success:
+        m.is_accessible = False
+        db.commit()
     log_mount_event(
         db,
         mount_id=m.id,
         mount_point=m.mount_point,
         event_type="unmount",
         status="ok" if success else "failed",
-        message=msg,
-        details={"fs_type": fs_type},
+        message=msg if healthy else f"{msg}; stale health check before unmount: {health_msg}",
+        details={"fs_type": fs_type, "lazy": lazy, "health": health_msg},
     )
     return ok({"unmounted": success, "method": msg if success else None,
                "error": None if success else msg})
