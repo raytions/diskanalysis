@@ -68,7 +68,7 @@ def get_scan_schedule(conn) -> dict:
         "enabled": get_bool_setting(conn, "scan_schedule_enabled", False),
         "interval_minutes": interval,
         "scan_mode": get_setting(conn, "scan_schedule_mode", "all_mounts"),
-        "scan_type": get_setting(conn, "scan_schedule_scan_type", "full"),
+        "scan_type": "full",
         "mount_ids": mount_ids,
         "target_path": get_setting(conn, "scan_schedule_target_path", ""),
         "filesystem_boundary_only": get_bool_setting(conn, "scan_schedule_filesystem_boundary_only", True),
@@ -157,7 +157,7 @@ def update_scan_schedule(req: ScanScheduleRequest, request: Request,
     from datetime import datetime, timedelta
 
     mode = req.scan_mode if req.scan_mode in {"all_mounts", "selected_mounts", "path"} else "all_mounts"
-    scan_type = req.scan_type if req.scan_type in {"full", "incremental"} else "full"
+    scan_type = "full"
     interval = max(1, min(req.interval_minutes, 10080))
     cold_days = max(1, req.cold_days)
     mount_ids = ",".join(str(i) for i in req.mount_ids if i > 0)

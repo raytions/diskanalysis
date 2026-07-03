@@ -121,7 +121,6 @@ def run_scan(
     one_filesystem: bool = True,
     exclude_paths: list[str] | None = None,
     exclude_globs: list[str] | None = None,
-    since_timestamp: float | None = None,   # incremental: skip files with mtime <= this
     cumulative_files: int = 0,
     cumulative_bytes: int = 0,
     cumulative_dirs: int = 0,
@@ -219,8 +218,6 @@ def run_scan(
         size = st.st_size
         atime = st.st_atime
         mtime = st.st_mtime
-        if since_timestamp and mtime <= since_timestamp and not is_link:
-            continue
         ctime = st.st_ctime
         ext = Path(path).suffix.lower() or None
         bucket = _cold_bucket(atime, now_ts, cold_days)

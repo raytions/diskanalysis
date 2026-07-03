@@ -21,6 +21,7 @@ router = APIRouter(prefix="/api")
 
 # Maps scan_id → running subprocess.Popen (in-memory; cleared on server restart)
 _active_procs: dict[int, subprocess.Popen] = {}
+_ACTIVE_SCAN_STATUSES = ("running", "queued")
 
 
 @router.get("/scans")
@@ -90,23 +91,76 @@ def delete_scan(scan_id: int, request: Request, db: Session = Depends(get_db),
 @router.post("/scans/{scan_id}/stop")
 def stop_scan(scan_id: int, request: Request, db: Session = Depends(get_db),
               _: None = Depends(auth.require_admin)):
+    result = _request_scan_stop(scan_id, db)
+    if result["state"] == "skipped":
+        raise HTTPException(status_code=409, detail=f"Scan is not running ({result['status']})")
+    return ok(result)
+
+
+@router.post("/scans/stop")
+def stop_scans_batch(ids: list[int], request: Request, db: Session = Depends(get_db),
+                     _: None = Depends(auth.require_admin)):
+    if not ids:
+        raise HTTPException(status_code=400, detail="No scan ids provided")
+
+    results = []
+    for scan_id in dict.fromkeys(ids):
+        try:
+            results.append(_request_scan_stop(scan_id, db))
+        except HTTPException as exc:
+            if exc.status_code == 404:
+                results.append({"id": scan_id, "state": "missing", "status": "missing"})
+            else:
+                raise
+    return ok({
+        "items": results,
+        "requested": [r["id"] for r in results if r["state"] in ("stopping", "stopped")],
+        "skipped": [r["id"] for r in results if r["state"] not in ("stopping", "stopped")],
+    })
+
+
+def _finish_stopped_scan(s: Scan) -> None:
+    now = datetime.now()
+    s.status = "stopped"
+    s.finished_at = now
+    if s.started_at:
+        s.duration_seconds = (now - s.started_at).total_seconds()
+    s.worker_pid = None
+
+
+def _request_scan_stop(scan_id: int, db: Session) -> dict:
     s = db.query(Scan).get(scan_id)
     if not s:
         raise HTTPException(status_code=404, detail="Scan not found")
-    if s.status not in ("running", "queued"):
-        raise HTTPException(status_code=409, detail="Scan is not running")
+    if s.status not in _ACTIVE_SCAN_STATUSES:
+        return {"id": scan_id, "state": "skipped", "status": s.status}
 
     # Set DB flag; queued scans check this before starting
     s.stop_requested = True
     if s.status == "queued":
-        s.status = "stopped"
-        s.finished_at = datetime.now()
+        _finish_stopped_scan(s)
         db.commit()
-        return ok({"stopping": scan_id})
+        return {"id": scan_id, "state": "stopped", "status": "stopped"}
+
+    pid = s.worker_pid
     db.commit()
 
+    if _signal_scan_process(scan_id, pid):
+        return {"id": scan_id, "state": "stopping", "status": "running"}
+
+    db.refresh(s)
+    if s.status in _ACTIVE_SCAN_STATUSES:
+        _finish_stopped_scan(s)
+        db.commit()
+        return {"id": scan_id, "state": "stopped", "status": "stopped"}
+    return {"id": scan_id, "state": "skipped", "status": s.status}
+
+
+def _signal_scan_process(scan_id: int, pid: int | None) -> bool:
     proc = _active_procs.get(scan_id)
     if proc is not None:
+        if proc.poll() is not None:
+            return False
         # Send SIGTERM for graceful stop; escalate to SIGKILL in background
         try:
             proc.send_signal(signal.SIGTERM)
@@ -118,34 +172,22 @@ def stop_scan(scan_id: int, request: Request, db: Session = Depends(get_db),
             daemon=True,
             name=f"stop-{scan_id}",
         ).start()
-    else:
-        # No in-memory subprocess (e.g. after server restart — use stored worker_pid)
-        pid = s.worker_pid
-        if pid:
-            try:
-                os.kill(pid, signal.SIGTERM)
-                threading.Thread(
-                    target=_kill_by_pid_after_timeout,
-                    args=(scan_id, pid),
-                    daemon=True,
-                    name=f"stop-pid-{scan_id}",
-                ).start()
-            except (ProcessLookupError, OSError):
-                # Process already gone — mark stopped immediately
-                s = db.query(Scan).get(scan_id)
-                if s and s.status == "running":
-                    s.status = "stopped"
-                    s.finished_at = datetime.now()
-                    db.commit()
-        else:
-            # No PID at all — mark directly
-            s = db.query(Scan).get(scan_id)
-            if s and s.status == "running":
-                s.status = "stopped"
-                s.finished_at = datetime.now()
-                db.commit()
+        return True
 
-    return ok({"stopping": scan_id})
+    # No in-memory subprocess (e.g. after server restart) — use stored worker_pid.
+    if pid:
+        try:
+            os.kill(pid, signal.SIGTERM)
+            threading.Thread(
+                target=_kill_by_pid_after_timeout,
+                args=(scan_id, pid),
+                daemon=True,
+                name=f"stop-pid-{scan_id}",
+            ).start()
+            return True
+        except (ProcessLookupError, OSError):
+            return False
+    return False
 
 
 def _escalate_to_kill(scan_id: int, proc: subprocess.Popen, timeout: int = 8) -> None:
@@ -177,19 +219,73 @@ def _kill_by_pid_after_timeout(scan_id: int, pid: int, timeout: int = 8) -> None
     _mark_stopped(scan_id)
 
 
+def _get_scan_exit_state(scan_id: int) -> tuple[str | None, bool]:
+    db = SessionLocal()
+    try:
+        s = db.query(Scan).get(scan_id)
+        if not s:
+            return None, False
+        return s.status, bool(s.stop_requested)
+    except Exception as e:
+        logger.warning("Failed to read scan %d exit state: %s", scan_id, e)
+        return None, False
+    finally:
+        db.close()
+
+
 def _mark_stopped(scan_id: int) -> None:
     db = SessionLocal()
     try:
         s = db.query(Scan).get(scan_id)
-        if s and s.status == "running":
-            s.status = "stopped"
-            s.finished_at = datetime.now()
+        if s and s.status in _ACTIVE_SCAN_STATUSES:
+            _finish_stopped_scan(s)
             db.commit()
             logger.info("Scan %d marked as stopped in DB", scan_id)
     except Exception as e:
         logger.warning("Failed to mark scan %d stopped: %s", scan_id, e)
     finally:
         db.close()
+
+
+def _mark_interrupted(scan_id: int, message: str) -> None:
+    db = SessionLocal()
+    try:
+        s = db.query(Scan).get(scan_id)
+        if s and s.status in _ACTIVE_SCAN_STATUSES:
+            now = datetime.now()
+            s.status = "interrupted"
+            s.finished_at = now
+            if s.started_at:
+                s.duration_seconds = (now - s.started_at).total_seconds()
+            s.worker_pid = None
+            s.error_summary = message
+            db.commit()
+            logger.warning("Scan %d marked interrupted: %s", scan_id, message)
+    except Exception as e:
+        logger.warning("Failed to mark scan %d interrupted: %s", scan_id, e)
+    finally:
+        db.close()
+
+
+def _finalize_scan_process_exit(scan_id: int, returncode: int) -> bool:
+    """Return True only when this scan really completed and old data can be purged."""
+    status, stop_requested = _get_scan_exit_state(scan_id)
+    if returncode == 0:
+        if status == "completed":
+            from app.api.routes_mounts import invalidate_overview_cache
+            invalidate_overview_cache()
+            return True
+        if stop_requested and status in _ACTIVE_SCAN_STATUSES:
+            _mark_stopped(scan_id)
+        elif status in _ACTIVE_SCAN_STATUSES:
+            _mark_interrupted(scan_id, "Worker exited without final scan status")
+        return False
+
+    if stop_requested:
+        _mark_stopped(scan_id)
+    elif status in _ACTIVE_SCAN_STATUSES:
+        _mark_interrupted(scan_id, f"Worker exited with return code {returncode}")
+    return False
 
 
 def _wal_checkpoint(mode: str = "TRUNCATE") -> None:
@@ -456,13 +552,9 @@ def _launch_parallel_mounts(scan_infos: list[tuple[int, str]], max_parallel: int
 
             proc.wait()
             _active_procs.pop(scan_id, None)
-            if proc.returncode == 0:
-                from app.api.routes_mounts import invalidate_overview_cache
-                invalidate_overview_cache()
+            if _finalize_scan_process_exit(scan_id, proc.returncode):
                 with _counter_lock:
                     _completed_ids.append(scan_id)
-            elif proc.returncode is not None and proc.returncode < 0:
-                _mark_stopped(scan_id)
         finally:
             sem.release()
             with _counter_lock:
@@ -489,23 +581,8 @@ def _monitor_proc(scan_id: int, proc: subprocess.Popen) -> None:
     rc = proc.returncode
     logger.info("Scan %d subprocess exited (rc=%d)", scan_id, rc)
 
-    if rc == 0:
-        from app.api.routes_mounts import invalidate_overview_cache
-        invalidate_overview_cache()
+    if _finalize_scan_process_exit(scan_id, rc):
         def _single_cleanup():
             _purge_old_scan_files(scan_id)
             _wal_checkpoint("TRUNCATE")
         threading.Thread(target=_single_cleanup, daemon=True, name=f"cleanup-{scan_id}").start()
-    elif rc is not None and rc < 0:
-        # Killed by signal (e.g. SIGKILL from stop endpoint or OOM)
-        db = SessionLocal()
-        try:
-            s = db.query(Scan).get(scan_id)
-            if s and s.status == "running":
-                s.status = "stopped"
-                s.finished_at = datetime.now()
-                db.commit()
-        except Exception:
-            pass
-        finally:
-            db.close()

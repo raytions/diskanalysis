@@ -92,7 +92,6 @@ def main() -> None:
                     db, scan, mount.mount_point, req,
                     total_files, total_bytes, total_dirs, error_count,
                     cold_files, cold_bytes,
-                    since_timestamp=_get_incremental_baseline(db, req, mount.mount_point),
                     stop_event=stop_event,
                 )
                 db.refresh(scan)
@@ -118,12 +117,10 @@ def main() -> None:
                 [e.strip() for e in req.exclude_rules.split(",") if e.strip()]
                 if req.exclude_rules else []
             )
-            since_ts = _get_incremental_baseline(db, req, root)
             run_scan(
                 db=db, scan=scan, root_path=root,
                 one_filesystem=req.filesystem_boundary_only,
                 exclude_paths=exclude_paths,
-                since_timestamp=since_ts,
                 stop_event=stop_event,
             )
             db.refresh(scan)
@@ -147,26 +144,11 @@ def main() -> None:
         logger.info("Scan worker for scan %d exiting (pid=%d)", scan_id, os.getpid())
 
 
-def _get_incremental_baseline(db, req, root_path) -> float | None:
-    from app.models import Scan
-    if req.scan_type != "incremental":
-        return None
-    last = (
-        db.query(Scan)
-        .filter(Scan.status == "completed", Scan.target_path == root_path)
-        .order_by(Scan.started_at.desc())
-        .first()
-    )
-    if last and last.started_at:
-        return last.started_at.timestamp()
-    return None
-
-
 def _sub_scan(
     db, scan, root, req,
     cumulative_files, cumulative_bytes, cumulative_dirs, cumulative_errors,
     cumulative_cold_files=0, cumulative_cold_bytes=0,
-    since_timestamp=None, stop_event=None,
+    stop_event=None,
 ) -> None:
     from app.services.scanner import run_scan
     exclude_paths = (
@@ -179,7 +161,6 @@ def _sub_scan(
         db=db, scan=scan, root_path=root,
         one_filesystem=req.filesystem_boundary_only,
         exclude_paths=exclude_paths,
-        since_timestamp=since_timestamp,
         cumulative_files=cumulative_files,
         cumulative_bytes=cumulative_bytes,
         cumulative_dirs=cumulative_dirs,

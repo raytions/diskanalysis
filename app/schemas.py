@@ -94,7 +94,7 @@ class ExtensionSummaryItem(BaseModel):
 
 class ScanCreateRequest(BaseModel):
     scan_mode: str = "all_mounts"  # all_mounts | selected_mounts | single_mount | path
-    scan_type: str = "full"        # full | incremental
+    scan_type: str = "full"
     mount_id: int | None = None
     mount_ids: list[int] | None = None  # for selected_mounts mode
     target_path: str | None = None

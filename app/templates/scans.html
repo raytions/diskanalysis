@@ -23,14 +23,6 @@
       </select>
     </div>
 
-    <div class="form-group">
-      <label>Scan Type</label>
-      <select name="scan_type" id="scan_type">
-        <option value="full">Full Scan — index all files</option>
-        <option value="incremental">Incremental — only changed files</option>
-      </select>
-    </div>
-
     <div class="form-group" id="group-mounts">
       <label style="margin-bottom:.35rem;">
         Mounts
@@ -134,13 +126,6 @@
     <input type="text" id="schedule-target-path" value="{{ scan_schedule.target_path }}" placeholder="/mnt/nas1/data">
   </div>
   <div class="form-group">
-    <label>Scan Type</label>
-    <select id="schedule-scan-type">
-      <option value="full" {% if scan_schedule.scan_type == 'full' %}selected{% endif %}>Full Scan</option>
-      <option value="incremental" {% if scan_schedule.scan_type == 'incremental' %}selected{% endif %}>Incremental</option>
-    </select>
-  </div>
-  <div class="form-group">
     <label>Cold Threshold</label>
     <input type="number" id="schedule-cold-days" value="{{ scan_schedule.cold_days }}" min="1" style="max-width:100px;text-align:center;">
   </div>
@@ -171,6 +156,7 @@
     <h2 style="margin:0;">Scan History</h2>
     {% if can_admin %}
     <span id="hist-sel-label" style="font-size:.82rem;color:var(--text-dim);margin-left:auto;visibility:hidden;"></span>
+    <button id="hist-sel-stop" class="btn btn-danger btn-sm" style="display:none;" onclick="stopHistSel()"><svg class="icon"><use href="#i-stop"/></svg> Stop</button>
     <button id="hist-sel-delete" class="btn btn-danger btn-sm" style="display:none;" onclick="deleteHistSel()">Delete</button>
     {% endif %}
   </div>
@@ -192,7 +178,7 @@
     </thead>
     <tbody id="scans-tbody">
       {% for s in scans %}
-      <tr data-selectable data-id="{{ s.id }}" onclick="handleHistClick(event, this)" style="cursor:pointer;">
+      <tr data-selectable data-id="{{ s.id }}" data-status="{{ s.status }}" onclick="handleHistClick(event, this)" style="cursor:pointer;">
         <td><a href="/scans/{{ s.id }}" onclick="event.stopPropagation()">#{{ s.id }}</a></td>
         <td title="{{ s.target_path or '' }}"><div class="scan-target-cell dimmed">{{ s.target_path or 'all' }}</div></td>
         <td><span class="badge badge-{{ s.status }}">{{ s.status }}</span></td>
@@ -251,7 +237,7 @@ async function submitScan(e) {
   const mode = form.scan_mode.value;
   const data = {
     scan_mode: mode,
-    scan_type: form.scan_type.value,
+    scan_type: 'full',
     cold_days: parseInt(form.cold_days.value),
     filesystem_boundary_only: form.fs_boundary.checked,
     exclude_rules: form.exclude_rules.value.trim() || null,
@@ -310,7 +296,7 @@ async function saveScanSchedule() {
     enabled: document.getElementById('schedule-enabled').checked,
     interval_minutes: parseInt(document.getElementById('schedule-interval').value || '360'),
     scan_mode: mode,
-    scan_type: document.getElementById('schedule-scan-type').value,
+    scan_type: 'full',
     mount_ids: mountIds,
     target_path: document.getElementById('schedule-target-path').value.trim(),
     filesystem_boundary_only: document.getElementById('schedule-boundary').checked,
@@ -367,19 +353,54 @@ function handleHistClick(e, row) {
 
 function updateHistUI() {
   const label = document.getElementById('hist-sel-label');
-  const btn = document.getElementById('hist-sel-delete');
+  const delBtn = document.getElementById('hist-sel-delete');
+  const stopBtn = document.getElementById('hist-sel-stop');
   if (!label) return;
   if (histSel.size > 0) {
+    const rows = [...histSel].map(id => document.querySelector('#scans-tbody tr[data-id="' + id + '"]')).filter(Boolean);
+    const activeCount = rows.filter(r => ['running', 'queued'].includes(r.dataset.status)).length;
     label.style.visibility = ''; label.textContent = histSel.size + ' selected';
-    btn.style.display = '';
+    if (stopBtn) stopBtn.style.display = activeCount > 0 ? '' : 'none';
+    if (delBtn) delBtn.style.display = activeCount === 0 ? '' : 'none';
   } else {
     label.style.visibility = 'hidden'; label.textContent = '';
-    btn.style.display = 'none';
+    if (stopBtn) stopBtn.style.display = 'none';
+    if (delBtn) delBtn.style.display = 'none';
+  }
+}
+
+async function stopHistSel() {
+  if (!histSel.size) return;
+  const ids = [...histSel]
+    .map(Number)
+    .filter(id => {
+      const row = document.querySelector('#scans-tbody tr[data-id="' + id + '"]');
+      return row && ['running', 'queued'].includes(row.dataset.status);
+    });
+  if (!ids.length) return;
+  if (!confirm('Stop ' + ids.length + ' active scan(s)?\\nProgress so far will be saved.')) return;
+  try {
+    const r = await fetch('/api/scans/stop', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(ids)});
+    const j = await r.json();
+    if (!j.ok) { alert('Error: ' + (j.error || 'unknown')); return; }
+    ids.forEach(id => _activeIds.add(id));
+    showToast('Stop requested for ' + (j.data.requested?.length || ids.length) + ' scan(s).');
+    setTimeout(_pollActive, 500);
+  } catch(e) {
+    alert('Network error: ' + e.message);
   }
 }
 
 async function deleteHistSel() {
   if (!histSel.size) return;
+  const activeIds = [...histSel].filter(id => {
+    const row = document.querySelector('#scans-tbody tr[data-id="' + id + '"]');
+    return row && ['running', 'queued'].includes(row.dataset.status);
+  });
+  if (activeIds.length) {
+    alert('Stop active scans before deleting them.');
+    return;
+  }
   if (!confirm('Delete ' + histSel.size + ' scan(s) and all their file records?')) return;
   const ids = [...histSel].map(Number);
   try {
@@ -438,6 +459,7 @@ function _applyRow(scan) {
   const row = document.querySelector(`#scans-tbody tr[data-id="${scan.id}"]`);
   if (!row) return;
   const cells = row.querySelectorAll('td');
+  row.dataset.status = scan.status;
   // cols: [0]=id [1]=target [2]=status [3]=started [4]=duration [5]=files [6]=size [7]=errors
   const targetEl = cells[1].querySelector('.scan-target-cell') || cells[1];
   targetEl.textContent = scan.target_path || 'all';
@@ -465,6 +487,7 @@ function _applyRow(scan) {
   const errs = scan.error_count || 0;
   cells[7].textContent = errs;
   cells[7].className = 'num' + (errs > 0 ? ' warn-text' : '');
+  updateHistUI();
 }
 
 async function _pollActive() {

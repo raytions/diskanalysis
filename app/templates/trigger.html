@@ -17,17 +17,6 @@
       </select>
     </div>
 
-    <div class="form-group">
-      <label>Scan Type</label>
-      <select name="scan_type" id="scan_type">
-        <option value="full">Full Scan — index all files</option>
-        <option value="incremental">Incremental — only files changed since last scan</option>
-      </select>
-      <div class="hint" id="scan-type-hint" style="display:none;">
-        Incremental scan skips files whose mtime hasn't changed since the previous completed scan of the same path. Useful for detecting recent changes quickly.
-      </div>
-    </div>
-
     <!-- Mount multi-select (shown for selected_mounts mode) -->
     <div class="form-group" id="group-mounts">
       <label style="margin-bottom:.5rem;">
@@ -103,10 +92,6 @@ function onModeChange() {
   document.getElementById('group-path').style.display = mode === 'path' ? '' : 'none';
 }
 
-document.getElementById('scan_type').addEventListener('change', function() {
-  document.getElementById('scan-type-hint').style.display = this.value === 'incremental' ? 'block' : 'none';
-});
-
 function toggleAll(checked) {
   document.querySelectorAll('#mount-list input[type=checkbox]').forEach(cb => {
     if (!cb.disabled) cb.checked = checked;
@@ -125,7 +110,7 @@ async function submitScan(e) {
   const mode = form.scan_mode.value;
   const data = {
     scan_mode: mode,
-    scan_type: form.scan_type.value,
+    scan_type: 'full',
     cold_days: parseInt(form.cold_days.value),
     filesystem_boundary_only: form.fs_boundary.checked,
     exclude_rules: form.exclude_rules.value.trim() || null,
