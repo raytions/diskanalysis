@@ -359,11 +359,52 @@ class SSHMountRequest(BaseModel):
     port: int = 22
     password: str = ""
     key_path: str = ""
+    create_local_dir: bool = True
+    use_sudo_mkdir: bool = False
+
+
+def _sudo_mode_enabled(db: Session) -> bool:
+    from app.api.routes_settings import get_sudo_mode_enabled
+    with db.bind.connect() as conn:
+        return get_sudo_mode_enabled(conn)
+
+
+def _create_mount_dir(path: str, use_sudo: bool, db: Session) -> tuple[bool, str, str]:
+    """Create a mount directory. Sudo mode only allows this one whitelisted command."""
+    if not os.path.isabs(path) or "\x00" in path or path.rstrip("/") == "":
+        return False, "Mount directory must be an absolute path.", ""
+    try:
+        os.makedirs(path, exist_ok=True)
+        return True, "created", f"mkdir -p {path}"
+    except OSError as e:
+        if not use_sudo:
+            return False, f"Cannot create {path}: {e}", f"mkdir -p {path}"
+        if not _sudo_mode_enabled(db):
+            return False, "Sudo mode is disabled in Settings.", f"sudo install -d -m 0755 -o {os.getuid()} -g {os.getgid()} {path}"
+        sudo = shutil.which("sudo")
+        install = shutil.which("install")
+        if not sudo or not install:
+            return False, "sudo or install is not available on this server.", ""
+        cmd = [
+            sudo, "-n", install, "-d",
+            "-m", "0755",
+            "-o", str(os.getuid()),
+            "-g", str(os.getgid()),
+            path,
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
+        cmd_display = " ".join(cmd)
+        if result.returncode == 0:
+            return True, "created_with_sudo", cmd_display
+        err = (result.stderr or result.stdout or "sudo mkdir failed").strip()
+        return False, err, cmd_display
 
 
 @router.post("/mounts/mount-ssh")
 def mount_ssh_fs(req: SSHMountRequest, request: Request, db: Session = Depends(get_db), _: None = Depends(auth.require_admin)):
     """Attempt to mount a remote SSH path via sshfs. Returns the sshfs command regardless."""
+    from app.services.mount_events import log_mount_event
+
     local = req.local_path.rstrip("/") or "/"
     host = f"[{req.host}]" if ":" in req.host else req.host
     remote = f"{req.username}@{host}:{req.remote_path}"
@@ -379,16 +420,35 @@ def mount_ssh_fs(req: SSHMountRequest, request: Request, db: Session = Depends(g
 
     # Already mounted?
     if os.path.ismount(local):
+        log_mount_event(
+            db, mount_point=local, event_type="mount", status="ok",
+            message="SSHFS mount already exists.", command=cmd_display,
+            details={"remote": remote, "already": True},
+        )
         return ok({"mounted": True, "already": True, "command": cmd_display})
 
     # Create local directory
-    try:
-        os.makedirs(local, exist_ok=True)
-    except OSError as e:
-        return ok({"mounted": False, "error": f"Cannot create {local}: {e}", "command": cmd_display})
+    mkdir_command = ""
+    if req.create_local_dir:
+        created, mkdir_msg, mkdir_command = _create_mount_dir(local, req.use_sudo_mkdir, db)
+        log_mount_event(
+            db, mount_point=local, event_type="mkdir",
+            status="ok" if created else "failed",
+            message=mkdir_msg, command=mkdir_command,
+            details={"sudo": req.use_sudo_mkdir},
+        )
+        if not created:
+            return ok({"mounted": False, "error": mkdir_msg, "command": cmd_display, "mkdir_command": mkdir_command})
+    elif not os.path.isdir(local):
+        msg = f"Mount directory does not exist: {local}"
+        log_mount_event(db, mount_point=local, event_type="mkdir", status="failed", message=msg)
+        return ok({"mounted": False, "error": msg, "command": cmd_display})
 
     # sshfs not installed
     if not shutil.which("sshfs"):
+        log_mount_event(db, mount_point=local, event_type="mount", status="failed",
+                        message="sshfs is not installed on this server.", command=cmd_display,
+                        details={"remote": remote})
         return ok({
             "mounted": False,
             "error": "sshfs is not installed on this server",
@@ -404,6 +464,9 @@ def mount_ssh_fs(req: SSHMountRequest, request: Request, db: Session = Depends(g
             env["SSHPASS"] = req.password
             full_cmd = ["sshpass", "-e"] + cmd_parts
         else:
+            log_mount_event(db, mount_point=local, event_type="mount", status="failed",
+                            message="sshpass is not installed for password auth.", command=cmd_display,
+                            details={"remote": remote})
             return ok({
                 "mounted": False,
                 "error": "sshpass is not installed (required for password auth). Install it or use SSH key auth instead.",
@@ -413,12 +476,24 @@ def mount_ssh_fs(req: SSHMountRequest, request: Request, db: Session = Depends(g
     try:
         result = subprocess.run(full_cmd, capture_output=True, text=True, timeout=30, env=env)
         if result.returncode == 0:
-            return ok({"mounted": True, "command": cmd_display})
+            log_mount_event(db, mount_point=local, event_type="mount", status="ok",
+                            message="SSHFS mounted successfully.", command=cmd_display,
+                            details={"remote": remote, "mkdir_command": mkdir_command})
+            return ok({"mounted": True, "command": cmd_display, "mkdir_command": mkdir_command})
         err_msg = (result.stderr or result.stdout or "sshfs exited with error").strip()
+        log_mount_event(db, mount_point=local, event_type="mount", status="failed",
+                        message=err_msg, command=cmd_display,
+                        details={"remote": remote, "returncode": result.returncode, "mkdir_command": mkdir_command})
         return ok({"mounted": False, "error": err_msg, "command": cmd_display})
     except subprocess.TimeoutExpired:
+        log_mount_event(db, mount_point=local, event_type="mount", status="failed",
+                        message="Connection timed out.", command=cmd_display,
+                        details={"remote": remote, "mkdir_command": mkdir_command})
         return ok({"mounted": False, "error": "Connection timed out (30s). Check host/port.", "command": cmd_display})
     except Exception as e:
+        log_mount_event(db, mount_point=local, event_type="mount", status="failed",
+                        message=str(e), command=cmd_display,
+                        details={"remote": remote, "mkdir_command": mkdir_command})
         return ok({"mounted": False, "error": str(e), "command": cmd_display})
 
 
@@ -468,6 +543,23 @@ def test_mount_path(path: str, db: Session = Depends(get_db)):
     return ok(result)
 
 
+@router.get("/mounts/events")
+def mount_events(limit: int = Query(default=100, ge=1, le=500), db: Session = Depends(get_db)):
+    from app.services.mount_events import list_mount_events
+    return ok({"items": list_mount_events(db, limit=limit)})
+
+
+@router.get("/mounts/{mount_id}/events")
+def mount_events_for_mount(
+    mount_id: int,
+    limit: int = Query(default=50, ge=1, le=200),
+    db: Session = Depends(get_db),
+):
+    _assert_mount(db, mount_id)
+    from app.services.mount_events import list_mount_events
+    return ok({"items": list_mount_events(db, mount_id=mount_id, limit=limit)})
+
+
 @router.post("/mounts/refresh")
 def refresh_mounts(request: Request, db: Session = Depends(get_db), _: None = Depends(auth.require_admin)):
     updated = mount_svc.refresh_mounts(db)
@@ -511,6 +603,16 @@ def add_mount(req: MountAddRequest, request: Request, db: Session = Depends(get_
         db.add(mount)
         db.commit()
         db.refresh(mount)
+        from app.services.mount_events import log_mount_event
+        log_mount_event(
+            db,
+            mount_id=mount.id,
+            mount_point=mount.mount_point,
+            event_type="register",
+            status="ok",
+            message="Mount registered from Web UI.",
+            details={"fs_type": mount.fs_type, "device": mount.device, "accessible": accessible},
+        )
         return ok(MountSchema.model_validate(mount).model_dump())
     except Exception as e:
         logger.exception("Error adding mount %s: %s", req.mount_point, e)
@@ -538,13 +640,26 @@ def _try_unmount(mount_point: str) -> tuple[bool, str]:
 @router.post("/mounts/{mount_id}/unmount")
 def unmount_fs(mount_id: int, request: Request, db: Session = Depends(get_db), _: None = Depends(auth.require_admin)):
     """Attempt to unmount a filesystem via fusermount or umount."""
+    from app.services.mount_events import log_mount_event
+
     m = db.query(Mount).get(mount_id)
     if not m:
         raise HTTPException(status_code=404, detail="Mount not found")
     fs_type = _check_proc_mounts(m.mount_point)
     if not fs_type:
+        log_mount_event(db, mount_id=m.id, mount_point=m.mount_point, event_type="unmount",
+                        status="warning", message="Unmount requested but mount point is not currently mounted.")
         return ok({"unmounted": False, "error": "Not currently mounted"})
     success, msg = _try_unmount(m.mount_point)
+    log_mount_event(
+        db,
+        mount_id=m.id,
+        mount_point=m.mount_point,
+        event_type="unmount",
+        status="ok" if success else "failed",
+        message=msg,
+        details={"fs_type": fs_type},
+    )
     return ok({"unmounted": success, "method": msg if success else None,
                "error": None if success else msg})
 

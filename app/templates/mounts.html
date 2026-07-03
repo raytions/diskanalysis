@@ -105,6 +105,17 @@
       <label>Private Key Path <span style="font-weight:400;color:var(--text-dim)">(on this server)</span></label>
       <input type="text" id="ssh-keypath" placeholder="~/.ssh/id_ed25519" oninput="updateMountCmd()" />
     </div>
+    <div class="mount-form-field">
+      <label>Password <span style="font-weight:400;color:var(--text-dim)">(optional; requires sshpass)</span></label>
+      <input type="password" id="ssh-pass" placeholder="leave empty for key auth" />
+    </div>
+    <div class="mount-form-field">
+      <label>Directory Creation</label>
+      <label style="display:flex;align-items:center;gap:.45rem;font-weight:400;color:var(--text-dim);">
+        <input type="checkbox" id="ssh-use-sudo-mkdir" onchange="updateMountCmd()" />
+        Use sudo mkdir if normal mkdir fails
+      </label>
+    </div>
     <div class="mount-form-field" style="grid-column:1/-1">
       <label>Remote Paths</label>
       <div id="ssh-paths-list"></div>
@@ -182,6 +193,39 @@
   </div>
   {% endif %}
 </form>
+
+{% if mount_events %}
+<section class="card" style="margin-bottom:1.25rem;">
+  <div style="display:flex;align-items:center;justify-content:space-between;gap:1rem;margin-bottom:.75rem;flex-wrap:wrap;">
+    <h2 style="margin:0;">Recent Mount Events</h2>
+    <span class="dimmed" style="font-size:.82rem;">latest {{ mount_events|length }}</span>
+  </div>
+  <div class="table-wrapper">
+    <table class="data-table">
+      <thead>
+        <tr>
+          <th>Time</th>
+          <th>Mount</th>
+          <th>Event</th>
+          <th>Status</th>
+          <th>Message</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for ev in mount_events %}
+        <tr>
+          <td class="dimmed" style="white-space:nowrap;">{{ ev.created_at }}</td>
+          <td title="{{ ev.mount_point }}"><div class="scan-target-cell dimmed">{{ ev.mount_point }}</div></td>
+          <td><code>{{ ev.event_type }}</code></td>
+          <td><span class="badge {% if ev.status == 'ok' %}badge-completed{% elif ev.status == 'failed' %}badge-failed{% else %}badge-queued{% endif %}">{{ ev.status }}</span></td>
+          <td class="dimmed">{{ ev.message }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
+{% endif %}
 
 {% if mounts %}
 <section class="card" style="padding:0;overflow:hidden;">
@@ -370,12 +414,15 @@ function getMountFormData() {
     const host = nfsHost(rawHost);
     const port = parseInt(document.getElementById('ssh-port').value || '22') || 22;
     const keyPath = document.getElementById('ssh-keypath').value.trim();
+    const password = document.getElementById('ssh-pass').value;
+    const useSudoMkdir = document.getElementById('ssh-use-sudo-mkdir').checked;
     const paths = getSshPaths();
     const first = paths[0] || { remote: '/', local: '' };
     mountPoint = first.local;
     device = user + '@' + host + ':' + first.remote;
     desc = first.remote;
-    ssh = { _paths: paths, username: user, host: rawHost, port, key_path: keyPath, password: '' };
+    ssh = { _paths: paths, username: user, host: rawHost, port, key_path: keyPath, password,
+            create_local_dir: true, use_sudo_mkdir: useSudoMkdir };
   } else if (['ext4','xfs','btrfs'].includes(fs)) {
     mountPoint = document.getElementById('local-path').value.trim();
     device = mountPoint;
@@ -392,6 +439,10 @@ function getMountFormData() {
 
 function getMountCommand() {
   const fs = document.getElementById('add-fs-type').value;
+  const mkdirLine = (path) => {
+    const sudo = document.getElementById('ssh-use-sudo-mkdir')?.checked;
+    return sudo ? `sudo install -d -m 0755 -o $(id -u) -g $(id -g) ${path}` : `mkdir -p ${path}`;
+  };
   if (['nfs4','nfs'].includes(fs)) {
     const host = nfsHost(document.getElementById('nfs-host').value);
     const exp = document.getElementById('nfs-export').value.trim();
@@ -419,7 +470,7 @@ function getMountCommand() {
     if (keyPath) baseOpts += ` -o IdentityFile=${keyPath}`;
 
     if (paths.length === 1) {
-      return `mkdir -p ${paths[0].local}\nsshfs ${baseOpts} ${user}@${host}:${paths[0].remote} ${paths[0].local}`;
+      return `${mkdirLine(paths[0].local)}\nsshfs ${baseOpts} ${user}@${host}:${paths[0].remote} ${paths[0].local}`;
     }
 
     // Multiple paths: SSH ControlMaster shares the connection — password entered once
@@ -430,7 +481,7 @@ function getMountCommand() {
     if (keyPath) sshMasterArgs += ` -i ${keyPath}`;
     const sshfsOpts = `${baseOpts} -o ControlPath=${ctlPath}`;
     const mountLines = paths.map(p =>
-      `mkdir -p ${p.local}\nsshfs ${sshfsOpts} ${user}@${host}:${p.remote} ${p.local}`
+      `${mkdirLine(p.local)}\nsshfs ${sshfsOpts} ${user}@${host}:${p.remote} ${p.local}`
     ).join('\n');
     return `# Enter password once to open shared connection:\nssh ${sshMasterArgs} ${user}@${host}\n\n# Mount all paths (no further password needed):\n${mountLines}`;
   }

@@ -1,5 +1,6 @@
 import logging
 import sys
+import threading
 from contextlib import asynccontextmanager
 from datetime import datetime
 
@@ -54,7 +55,12 @@ async def lifespan(app: FastAPI):
     logger.info("Starting DiskAnalysis — db: %s", settings.DB_PATH)
     init_db()
     _cleanup_orphaned_scans()
+    scheduler_stop = threading.Event()
+    app.state.scan_scheduler_stop = scheduler_stop
+    from app.services.scan_scheduler import start_scan_scheduler
+    start_scan_scheduler(scheduler_stop)
     yield
+    scheduler_stop.set()
     logger.info("Shutting down")
 
 

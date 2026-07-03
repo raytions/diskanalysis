@@ -28,6 +28,57 @@ def get_max_parallel_scans(conn) -> int:
         return 4
 
 
+def get_setting(conn, key: str, default: str = "") -> str:
+    row = conn.execute(text("SELECT value FROM app_settings WHERE key=:key"), {"key": key}).fetchone()
+    return str(row[0]) if row else default
+
+
+def get_bool_setting(conn, key: str, default: bool = False) -> bool:
+    value = get_setting(conn, key, "true" if default else "false").strip().lower()
+    return value in {"1", "true", "yes", "on"}
+
+
+def set_setting(conn, key: str, value: str) -> None:
+    conn.execute(text(
+        "INSERT OR REPLACE INTO app_settings (key, value) VALUES (:key, :value)"
+    ), {"key": key, "value": value})
+
+
+def get_sudo_mode_enabled(conn) -> bool:
+    return get_bool_setting(conn, "sudo_mode_enabled", False)
+
+
+def get_scan_schedule(conn) -> dict:
+    try:
+        interval = max(1, min(int(get_setting(conn, "scan_schedule_interval_minutes", "360")), 10080))
+    except ValueError:
+        interval = 360
+    try:
+        cold_days = max(1, int(get_setting(conn, "scan_schedule_cold_days", "90")))
+    except ValueError:
+        cold_days = 90
+    raw_mount_ids = get_setting(conn, "scan_schedule_mount_ids", "")
+    mount_ids = []
+    if raw_mount_ids.strip():
+        try:
+            mount_ids = [int(v) for v in raw_mount_ids.split(",") if v.strip()]
+        except ValueError:
+            mount_ids = []
+    return {
+        "enabled": get_bool_setting(conn, "scan_schedule_enabled", False),
+        "interval_minutes": interval,
+        "scan_mode": get_setting(conn, "scan_schedule_mode", "all_mounts"),
+        "scan_type": get_setting(conn, "scan_schedule_scan_type", "full"),
+        "mount_ids": mount_ids,
+        "target_path": get_setting(conn, "scan_schedule_target_path", ""),
+        "filesystem_boundary_only": get_bool_setting(conn, "scan_schedule_filesystem_boundary_only", True),
+        "exclude_rules": get_setting(conn, "scan_schedule_exclude_rules", ""),
+        "cold_days": cold_days,
+        "next_run_at": get_setting(conn, "scan_schedule_next_run_at", ""),
+        "last_started_at": get_setting(conn, "scan_schedule_last_started_at", ""),
+    }
+
+
 @router.get("")
 def get_settings(db: Session = Depends(get_db)):
     from app.services.analytics import get_path_attribution_enabled
@@ -65,16 +116,69 @@ class ScanSettingsRequest(BaseModel):
     max_parallel_scans: int
 
 
+class SudoSettingsRequest(BaseModel):
+    enabled: bool
+
+
+class ScanScheduleRequest(BaseModel):
+    enabled: bool
+    interval_minutes: int = 360
+    scan_mode: str = "all_mounts"
+    scan_type: str = "full"
+    mount_ids: list[int] = []
+    target_path: str = ""
+    filesystem_boundary_only: bool = True
+    exclude_rules: str = ""
+    cold_days: int = 90
+
+
 @router.post("/scan")
 def update_scan_settings(req: ScanSettingsRequest, request: Request,
                          db: Session = Depends(get_db), _=Depends(auth.require_admin)):
     n = max(1, min(req.max_parallel_scans, 32))
     with db.bind.connect() as conn:
-        conn.execute(text(
-            "INSERT OR REPLACE INTO app_settings (key, value) VALUES ('max_parallel_scans', :v)"
-        ), {"v": str(n)})
+        set_setting(conn, "max_parallel_scans", str(n))
         conn.commit()
     return ok({"max_parallel_scans": n})
+
+
+@router.post("/sudo")
+def update_sudo_settings(req: SudoSettingsRequest, request: Request,
+                         db: Session = Depends(get_db), _=Depends(auth.require_admin)):
+    with db.bind.connect() as conn:
+        set_setting(conn, "sudo_mode_enabled", "true" if req.enabled else "false")
+        conn.commit()
+    return ok({"sudo_mode_enabled": req.enabled})
+
+
+@router.post("/scan-schedule")
+def update_scan_schedule(req: ScanScheduleRequest, request: Request,
+                         db: Session = Depends(get_db), _=Depends(auth.require_admin)):
+    from datetime import datetime, timedelta
+
+    mode = req.scan_mode if req.scan_mode in {"all_mounts", "selected_mounts", "path"} else "all_mounts"
+    scan_type = req.scan_type if req.scan_type in {"full", "incremental"} else "full"
+    interval = max(1, min(req.interval_minutes, 10080))
+    cold_days = max(1, req.cold_days)
+    mount_ids = ",".join(str(i) for i in req.mount_ids if i > 0)
+    next_run = (datetime.now() + timedelta(minutes=interval)).isoformat(timespec="seconds")
+
+    with db.bind.connect() as conn:
+        set_setting(conn, "scan_schedule_enabled", "true" if req.enabled else "false")
+        set_setting(conn, "scan_schedule_interval_minutes", str(interval))
+        set_setting(conn, "scan_schedule_mode", mode)
+        set_setting(conn, "scan_schedule_scan_type", scan_type)
+        set_setting(conn, "scan_schedule_mount_ids", mount_ids)
+        set_setting(conn, "scan_schedule_target_path", req.target_path.strip())
+        set_setting(conn, "scan_schedule_filesystem_boundary_only", "true" if req.filesystem_boundary_only else "false")
+        set_setting(conn, "scan_schedule_exclude_rules", req.exclude_rules.strip())
+        set_setting(conn, "scan_schedule_cold_days", str(cold_days))
+        set_setting(conn, "scan_schedule_next_run_at", next_run)
+        conn.commit()
+
+    with db.bind.connect() as conn:
+        data = get_scan_schedule(conn)
+    return ok(data)
 
 
 # ── Confirmed users ───────────────────────────────────────────────────────────

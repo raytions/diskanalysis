@@ -14,6 +14,7 @@ from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.models import Mount
+from app.services.mount_events import log_mount_event
 
 logger = logging.getLogger(__name__)
 
@@ -152,6 +153,9 @@ def refresh_mounts(db: Session) -> list[Mount]:
         if mount is None:
             mount = Mount(mount_point=mp, created_at=now)
             db.add(mount)
+            previous_accessible = None
+        else:
+            previous_accessible = mount.is_accessible
 
         mount.device = info["device"]
         mount.fs_type = info["fs_type"]
@@ -164,12 +168,40 @@ def refresh_mounts(db: Session) -> list[Mount]:
         mount.updated_at = now
         mounts.append(mount)
 
+        if previous_accessible is False and info["is_accessible"]:
+            try:
+                log_mount_event(
+                    db,
+                    mount_id=mount.id,
+                    mount_point=mp,
+                    event_type="state",
+                    status="ok",
+                    message="Mount became accessible during refresh.",
+                    details={"fs_type": info["fs_type"], "device": info["device"]},
+                )
+            except Exception as e:
+                logger.debug("Failed to log mount reconnect event for %s: %s", mp, e)
+
     # Mark any previously-seen mount that's no longer discovered as inaccessible
     current_mps = {info["mount_point"] for info in discovered}
     stale = db.query(Mount).filter(Mount.mount_point.notin_(current_mps)).all()
     for m in stale:
+        was_accessible = m.is_accessible
         m.is_accessible = False
         m.updated_at = now
+        if was_accessible:
+            try:
+                log_mount_event(
+                    db,
+                    mount_id=m.id,
+                    mount_point=m.mount_point,
+                    event_type="state",
+                    status="warning",
+                    message="Mount disappeared from /proc/mounts during refresh.",
+                    details={"fs_type": m.fs_type, "device": m.device},
+                )
+            except Exception as e:
+                logger.debug("Failed to log stale mount event for %s: %s", m.mount_point, e)
 
     db.commit()
     for m in mounts:

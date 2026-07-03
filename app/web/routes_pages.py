@@ -67,7 +67,7 @@ def mounts_page(
     is_network: str = "",
     db: Session = Depends(get_db),
 ):
-    q = db.query(Mount).filter(Mount.is_accessible == True)
+    q = db.query(Mount)
     if fs_type:
         q = q.filter(Mount.fs_type == fs_type)
     if is_network == "yes":
@@ -91,14 +91,16 @@ def mounts_page(
     if updated:
         db.commit()
 
-    all_fs_types = sorted({m.fs_type for m in db.query(Mount).filter(Mount.is_accessible == True).all()})
+    all_fs_types = sorted({m.fs_type for m in db.query(Mount).all()})
     mounted_paths = _get_mounted_paths()
+    from app.services.mount_events import list_mount_events
     return _tr(request, "mounts.html", {
         "mounts": mounts,
         "all_fs_types": all_fs_types,
         "fs_type": fs_type,
         "is_network": is_network,
         "mounted_paths": mounted_paths,
+        "mount_events": list_mount_events(db, limit=12),
     })
 
 
@@ -154,10 +156,12 @@ def scan_detail_page(request: Request, scan_id: int, db: Session = Depends(get_d
 def settings_page(request: Request, db: Session = Depends(get_db)):
     from sqlalchemy import text
     from app.services.analytics import get_path_attribution_enabled
-    from app.api.routes_settings import get_max_parallel_scans
+    from app.api.routes_settings import get_max_parallel_scans, get_scan_schedule, get_sudo_mode_enabled
     with db.bind.connect() as conn:
         path_attr = get_path_attribution_enabled(conn)
         max_parallel_scans = get_max_parallel_scans(conn)
+        sudo_mode_enabled = get_sudo_mode_enabled(conn)
+        scan_schedule = get_scan_schedule(conn)
         users = conn.execute(text(
             "SELECT username, aliases, created_at FROM custom_users ORDER BY username"
         )).fetchall()
@@ -167,6 +171,9 @@ def settings_page(request: Request, db: Session = Depends(get_db)):
     return _tr(request, "settings.html", {
         "path_user_attribution": path_attr,
         "max_parallel_scans": max_parallel_scans,
+        "sudo_mode_enabled": sudo_mode_enabled,
+        "scan_schedule": scan_schedule,
+        "mounts": db.query(Mount).order_by(Mount.mount_point).all(),
         "users": [{"username": r[0],
                    "aliases": [a.strip() for a in (r[1] or "").split(",") if a.strip()],
                    "created_at": r[2]} for r in users],

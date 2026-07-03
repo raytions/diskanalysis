@@ -191,6 +191,29 @@ def _migrate(eng):
         """))
         conn.commit()
 
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS mount_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                mount_id INTEGER,
+                mount_point TEXT NOT NULL DEFAULT '',
+                event_type TEXT NOT NULL,
+                status TEXT NOT NULL,
+                message TEXT NOT NULL DEFAULT '',
+                command TEXT NOT NULL DEFAULT '',
+                details TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT DEFAULT (datetime('now'))
+            )
+        """))
+        conn.commit()
+        mount_event_idx = {row[1] for row in conn.execute(text("PRAGMA index_list(mount_events)"))}
+        if "ix_mount_events_mount_time" not in mount_event_idx:
+            conn.execute(text(
+                "CREATE INDEX IF NOT EXISTS ix_mount_events_mount_time "
+                "ON mount_events (mount_id, created_at)"
+            ))
+            conn.commit()
+            logger.info("Migrated: added mount_events table")
+
         # Add label column to mounts if missing
         mnt_cols = {row[1] for row in conn.execute(text("PRAGMA table_info(mounts)"))}
         if "label" not in mnt_cols:
