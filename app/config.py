@@ -9,7 +9,7 @@ _IN_DOCKER = Path("/.dockerenv").exists()
 
 class Settings(BaseSettings):
     APP_ENV: str = "production"
-    APP_HOST: str = "0.0.0.0"
+    APP_HOST: str = "::"
     APP_PORT: int = 8000
     DB_PATH: str = _DOCKER_DB
     DEFAULT_COLD_DAYS: int = 90

@@ -14,7 +14,7 @@ services:
       # - /proc:/proc:ro        # needed for /proc/mounts auto-discovery
     environment:
       - DB_PATH=/data/diskanalysis.db
-      - APP_HOST=0.0.0.0
+      - APP_HOST=::
       - APP_PORT=8000
       - DEFAULT_COLD_DAYS=${DEFAULT_COLD_DAYS:-90}
       - DEFAULT_TOP_N=${DEFAULT_TOP_N:-100}

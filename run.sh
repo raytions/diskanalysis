@@ -38,10 +38,13 @@ if [[ "${MODE:-docker}" == "python" ]]; then
     pip3 install -r requirements.txt --break-system-packages -q
   fi
 
-  echo "[run.sh] Starting DiskAnalysis on http://0.0.0.0:${APP_PORT:-8000}"
-  DB_PATH="$DB_PATH" python3 -m uvicorn app.main:app \
-    --host "${APP_HOST:-0.0.0.0}" \
-    --port "${APP_PORT:-8000}"
+  # Default to dual-stack. 0.0.0.0 is IPv4-only, and this host's
+  # campus name (yanglab5.bg.ic.ac.uk) has only an AAAA record.
+  if [[ "${APP_HOST:-::}" == "0.0.0.0" ]]; then
+    APP_HOST="::"
+  fi
+  echo "[run.sh] Starting DiskAnalysis on http://[${APP_HOST}]:${APP_PORT:-8000}"
+  DB_PATH="$DB_PATH" APP_HOST="$APP_HOST" python3 -m app.serve
   exit 0
 fi
 
