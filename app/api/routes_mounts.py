@@ -88,9 +88,11 @@ def dashboard_overview_tab(
     tab: str = "files",
     limit: int = Query(default=25, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
+    q: str = "",
     db: Session = Depends(get_db),
 ):
-    """Paginated data for Global Overview tabs: files, dirs, cold, users, dupes."""
+    """Paginated data for Global Overview tabs: files, dirs, cold, users, dupes.
+    `q` filters by case-insensitive substring (path / username / filename)."""
     from sqlalchemy import text as sqlt
     from app.services.analytics import _collect_known_usernames
 
@@ -121,6 +123,9 @@ def dashboard_overview_tab(
     # Stable cache key for this combination of mounts/scans
     pairs_key = ",".join(f"{mid}:{sid}" for mid, sid in sorted(mount_scan_pairs))
 
+    q = q.strip().lower()
+    q_where = f" AND instr(lower(path),'{q.replace(chr(39), chr(39) * 2)}')>0" if q else ""
+
     def _union_files(extra_where: str = "") -> str:
         parts = [
             f"SELECT id,path,size_bytes,extension,mtime,atime,is_cold,cold_days_bucket,mount_id FROM ("
@@ -131,11 +136,11 @@ def dashboard_overview_tab(
         ]
         return " UNION ALL ".join(parts)
 
-    def _union_dirs() -> str:
+    def _union_dirs(extra_where: str = "") -> str:
         parts = [
             f"SELECT id,path,total_size_bytes,file_count,cold_file_count,cold_total_size_bytes,mount_id FROM ("
             f"SELECT id,path,total_size_bytes,file_count,cold_file_count,cold_total_size_bytes,mount_id "
-            f"FROM directories WHERE mount_id={mid} AND scan_id={sid} "
+            f"FROM directories WHERE mount_id={mid} AND scan_id={sid}{extra_where} "
             f"ORDER BY total_size_bytes DESC LIMIT {sub_n})"
             for mid, sid in mount_scan_pairs
         ]
@@ -146,47 +151,41 @@ def dashboard_overview_tab(
         cached = _oc_get(count_key)
         if cached is not None:
             return cached
-        if extra_where == "":
-            # Use pre-computed totals from scans table — O(1) vs O(N_files)
-            with db.bind.connect() as conn:
-                result = conn.execute(sqlt(
-                    f"SELECT COALESCE(SUM(total_files),0) FROM scans WHERE id IN ({sid_in})"
-                )).fetchone()[0] or 0
-        elif extra_where == " AND is_cold=1":
-            with db.bind.connect() as conn:
-                result = conn.execute(sqlt(
-                    f"SELECT COALESCE(SUM(cold_file_count),0) FROM scans WHERE id IN ({sid_in})"
-                )).fetchone()[0] or 0
-        else:
-            # Fallback for any other filter: count from files table
-            parts = [
-                f"SELECT COUNT(*) AS c FROM files "
-                f"WHERE mount_id={mid} AND scan_id={sid} AND is_symlink=0{extra_where}"
-                for mid, sid in mount_scan_pairs
-            ]
-            with db.bind.connect() as conn:
-                result = conn.execute(sqlt(
-                    f"SELECT SUM(c) FROM ({' UNION ALL '.join(parts)})"
-                )).fetchone()[0] or 0
+        # Count stored rows (only top-N files per scan are kept), not scans.total_files,
+        # so the pager's page count matches what can actually be browsed.
+        parts = [
+            f"SELECT COUNT(*) AS c FROM files "
+            f"WHERE mount_id={mid} AND scan_id={sid} AND is_symlink=0{extra_where}"
+            for mid, sid in mount_scan_pairs
+        ]
+        with db.bind.connect() as conn:
+            result = conn.execute(sqlt(
+                f"SELECT SUM(c) FROM ({' UNION ALL '.join(parts)})"
+            )).fetchone()[0] or 0
         _oc_set(count_key, result)
         return result
 
-    def _count_dirs() -> int:
-        count_key = f"cnt:d:{pairs_key}"
+    def _count_dirs(extra_where: str = "") -> int:
+        count_key = f"cnt:d:{extra_where}:{pairs_key}"
         cached = _oc_get(count_key)
         if cached is not None:
             return cached
-        # Use pre-computed totals from scans table — O(1) vs O(N_dirs)
+        # Count stored rows, not scans.total_dirs (which can exceed what was persisted)
+        parts = [
+            f"SELECT COUNT(*) AS c FROM directories "
+            f"WHERE mount_id={mid} AND scan_id={sid}{extra_where}"
+            for mid, sid in mount_scan_pairs
+        ]
         with db.bind.connect() as conn:
             result = conn.execute(sqlt(
-                f"SELECT COALESCE(SUM(total_dirs),0) FROM scans WHERE id IN ({sid_in})"
+                f"SELECT SUM(c) FROM ({' UNION ALL '.join(parts)})"
             )).fetchone()[0] or 0
         _oc_set(count_key, result)
         return result
 
     if tab == "files":
-        union = _union_files()
-        total = _count_files()
+        union = _union_files(q_where)
+        total = _count_files(q_where)
         with db.bind.connect() as conn:
             rows = conn.execute(sqlt(
                 f"SELECT id,path,size_bytes,extension,mtime,atime,is_cold,cold_days_bucket,mount_id "
@@ -198,8 +197,8 @@ def dashboard_overview_tab(
                  for r in rows]
 
     elif tab == "dirs":
-        union = _union_dirs()
-        total = _count_dirs()
+        union = _union_dirs(q_where)
+        total = _count_dirs(q_where)
         with db.bind.connect() as conn:
             rows = conn.execute(sqlt(
                 f"SELECT id,path,total_size_bytes,file_count,cold_file_count,cold_total_size_bytes,mount_id "
@@ -210,8 +209,8 @@ def dashboard_overview_tab(
                  for r in rows]
 
     elif tab == "cold":
-        union = _union_files(" AND is_cold=1")
-        total = _count_files(" AND is_cold=1")
+        union = _union_files(" AND is_cold=1" + q_where)
+        total = _count_files(" AND is_cold=1" + q_where)
         with db.bind.connect() as conn:
             rows = conn.execute(sqlt(
                 f"SELECT id,path,size_bytes,extension,mtime,atime,is_cold,cold_days_bucket,mount_id "
@@ -275,6 +274,8 @@ def dashboard_overview_tab(
                 key=lambda x: -x["total_size_bytes"],
             )
             _oc_set(users_key, all_users)
+        if q:
+            all_users = [u for u in all_users if q in u["username"].lower() or q in u["uids"]]
         total = len(all_users)
         items = all_users[offset: offset + limit]
 
@@ -318,6 +319,10 @@ def dashboard_overview_tab(
 
         all_items = cached_dupes["items"]
         total = cached_dupes["total"]
+        if q and total != -1:
+            all_items = [d for d in all_items
+                         if q in d["filename"].lower() or any(q in p.lower() for p in d["paths"])]
+            total = len(all_items)
         items = all_items[offset: offset + limit]
 
     else:

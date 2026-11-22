@@ -83,7 +83,11 @@
 </div>
 
 <section class="card" id="global-overview-card" style="margin-bottom:0;">
-  <h2 style="margin-bottom:.5rem;">Global Overview</h2>
+  <div class="ov-head">
+    <h2 style="margin-bottom:0;">Global Overview</h2>
+    <input type="search" id="dash-search" class="settings-input ov-search" placeholder="Filter by path…"
+           autocomplete="off" oninput="onDashSearch(this.value)" />
+  </div>
   <div class="tabs" style="margin-bottom:0;">
     <button class="tab-btn active" onclick="switchDashTab('files',this)">Largest Files</button>
     <button class="tab-btn" onclick="switchDashTab('dirs',this)">Largest Dirs</button>
@@ -103,8 +107,24 @@
 // ── Tab state ────────────────────────────────────────────
 const TAB_NAMES = ['files','dirs','cold','users','dupes'];
 const _tabState = {};
-TAB_NAMES.forEach(t => _tabState[t] = { loaded: false, limit: 25, offset: 0, total: 0 });
+TAB_NAMES.forEach(t => _tabState[t] = { loaded: false, limit: 25, offset: 0, total: 0, q: '', seq: 0 });
 let _mountMap = {};
+let _activeTab = 'files';
+const SEARCH_HINTS = {
+  files: 'Filter by path…', dirs: 'Filter by path…', cold: 'Filter by path…',
+  users: 'Filter by user or UID…', dupes: 'Filter by filename or path…',
+};
+
+// ── Search (per-tab query, debounced, server-side) ───────
+let _searchTimer = null;
+function onDashSearch(val) {
+  clearTimeout(_searchTimer);
+  const tab = _activeTab;
+  _searchTimer = setTimeout(() => {
+    _tabState[tab].q = val.trim();
+    loadTab(tab, 0);
+  }, 350);
+}
 
 function switchDashTab(name, btn) {
   TAB_NAMES.forEach(t => {
@@ -112,6 +132,10 @@ function switchDashTab(name, btn) {
   });
   document.querySelectorAll('#global-overview-card .tab-btn').forEach(b => b.classList.remove('active'));
   btn.classList.add('active');
+  _activeTab = name;
+  const box = document.getElementById('dash-search');
+  box.value = _tabState[name].q;
+  box.placeholder = SEARCH_HINTS[name];
   if (!_tabState[name].loaded) loadTab(name);
 }
 
@@ -121,9 +145,11 @@ async function loadTab(tab, offset) {
   if (offset !== undefined) st.offset = offset;
   const container = document.getElementById('dtab-' + tab);
   container.innerHTML = '<p class="tab-loading">Loading…</p>';
+  const seq = ++st.seq;
   try {
-    const r = await fetch(`/api/dashboard/overview-tab?tab=${tab}&limit=${st.limit}&offset=${st.offset}`);
+    const r = await fetch(`/api/dashboard/overview-tab?tab=${tab}&limit=${st.limit}&offset=${st.offset}&q=${encodeURIComponent(st.q)}`);
     const j = await r.json();
+    if (seq !== st.seq) return;  // a newer request (e.g. new search text) superseded this one
     if (!j.ok) throw new Error(j.error || 'API error');
     st.total = j.data.total;
     st.loaded = true;
@@ -134,6 +160,7 @@ async function loadTab(tab, offset) {
       setTimeout(() => loadTab(tab, st.offset), 3000);
     }
   } catch(e) {
+    if (seq !== st.seq) return;
     container.innerHTML = `<p class="empty">Failed to load: ${e.message}</p>`;
     st.loaded = false;
   }
@@ -151,14 +178,28 @@ function buildPager(tab) {
   return `<div class="tab-pager">
     <span class="pager-side"></span>
     <div class="pager-center">
-      <button onclick="loadTab('${tab}',${Math.max(0,st.offset-st.limit)})" ${cur<=1?'disabled':''}>&#8249;</button>
-      <span class="pager-info">Page ${cur} / ${pages}</span>
-      <button onclick="loadTab('${tab}',${st.offset+st.limit})" ${cur>=pages?'disabled':''}>&#8250;</button>
+      <button title="First page" onclick="goPage('${tab}',1)" ${cur<=1?'disabled':''}>&#171;</button>
+      <button title="Previous page" onclick="goPage('${tab}',${cur-1})" ${cur<=1?'disabled':''}>&#8249;</button>
+      <span class="pager-info">Page
+        <input type="number" class="pager-input" min="1" max="${pages}" value="${cur}"
+               style="width:${String(pages).length + 2}ch" title="Type a page number and press Enter"
+               onchange="goPage('${tab}',this.value)" /> / ${pages}</span>
+      <button title="Next page" onclick="goPage('${tab}',${cur+1})" ${cur>=pages?'disabled':''}>&#8250;</button>
+      <button title="Last page" onclick="goPage('${tab}',${pages})" ${cur>=pages?'disabled':''}>&#187;</button>
     </div>
     <div class="pager-side pager-side-right">
       <select onchange="_tabState['${tab}'].limit=+this.value;loadTab('${tab}',0)">${sizeOpts}</select>
     </div>
   </div>`;
+}
+
+function goPage(tab, page) {
+  const st = _tabState[tab];
+  const pages = Math.ceil(st.total / st.limit) || 1;
+  let p = parseInt(page, 10);
+  if (isNaN(p)) p = Math.floor(st.offset / st.limit) + 1;
+  p = Math.min(Math.max(p, 1), pages);
+  loadTab(tab, (p - 1) * st.limit);
 }
 
 // ── Collapsible locations (dupes) ────────────────────────
@@ -182,7 +223,7 @@ function renderTab(tab, data) {
   if (!items.length) {
     el.innerHTML = data.total === -1
       ? '<p class="empty">Computing… will refresh automatically.</p>'
-      : '<p class="empty">No data yet.</p>';
+      : (_tabState[tab].q ? '<p class="empty">No matches.</p>' : '<p class="empty">No data yet.</p>');
     return;
   }
 
@@ -281,6 +322,21 @@ window.addEventListener('load', () => loadTab('files'));
 </script>
 
 <style>
+.ov-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: .75rem;
+  flex-wrap: wrap;
+  margin-bottom: .5rem;
+}
+.ov-search { width: 260px; max-width: 100%; }
+[data-theme="termix"] .ov-head {
+  border-bottom: 1px solid rgba(245,145,69,.14);
+  margin: -.1rem -.15rem .5rem;
+  padding: 0 .15rem .55rem;
+}
+[data-theme="termix"] .ov-head h2 { border-bottom: none; margin: 0; padding: 0; }
 .tab-pager {
   display: flex;
   align-items: center;
@@ -306,6 +362,22 @@ window.addEventListener('load', () => loadTab('files'));
   color: var(--text);
 }
 .tab-pager button:disabled { opacity: .35; cursor: default; }
+.tab-pager .pager-input {
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: .15rem .3rem;
+  font-size: .82rem;
+  font-family: inherit;
+  color: var(--text);
+  text-align: center;
+  min-width: 3ch;
+  -moz-appearance: textfield;
+  appearance: textfield;
+}
+.tab-pager .pager-input::-webkit-outer-spin-button,
+.tab-pager .pager-input::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+.tab-pager .pager-input:focus { outline: none; border-color: var(--accent); }
 .tab-pager select {
   background: var(--surface2);
   border: 1px solid var(--border);

@@ -203,7 +203,7 @@ def _settings_hash(conn) -> str:
         "SELECT username, aliases FROM custom_users ORDER BY username"
     )).fetchall()
     path_attr = get_path_attribution_enabled(conn)
-    content = f"path_attr={path_attr}|" + ";".join(f"{u}:{a or ''}" for u, a in rows)
+    content = f"v2|path_attr={path_attr}|" + ";".join(f"{u}:{a or ''}" for u, a in rows)
     return hashlib.md5(content.encode()).hexdigest()[:16]
 
 
@@ -507,8 +507,6 @@ def _build_user_agg_per_mount(conn, mount_triples: list, known_usernames: set, u
                     name = uid_to_name.get(uid, f"uid:{uid}" if uid is not None else "unknown")
                 agg[name]["file_count"] += fc
                 agg[name]["total_size_bytes"] += ts
-                if uid is not None and name in known_usernames:
-                    agg[name]["uids"].add(str(uid))
         else:
             # Old scans: fall back to files table
             if matched_depth1_comps or matched_depth2_prefixes:
@@ -538,8 +536,17 @@ def _build_user_agg_per_mount(conn, mount_triples: list, known_usernames: set, u
                 name = uid_to_name.get(uid, f"uid:{uid}" if uid is not None else "unknown")
                 agg[name]["file_count"] += fc
                 agg[name]["total_size_bytes"] += ts
-                if uid is not None and name in known_usernames:
-                    agg[name]["uids"].add(str(uid))
+
+    # Show every uid a user owns (across all scans), regardless of whether their
+    # usage on this mount was attributed by path or by uid.
+    all_uid_names = dict(uid_to_name)
+    for uid, uname in conn.execute(sqlt(
+        "SELECT DISTINCT uid, username FROM scan_uid_summary WHERE uid IS NOT NULL AND username IS NOT NULL"
+    )).fetchall():
+        all_uid_names.setdefault(uid, name_to_canonical.get(uname, uname) if name_to_canonical else uname)
+    for uid, name in all_uid_names.items():
+        if uid is not None and name in agg:
+            agg[name]["uids"].add(str(uid))
 
     return agg
 

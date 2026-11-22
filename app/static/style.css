@@ -945,6 +945,7 @@ select option { background: var(--surface); color: var(--text); }
   margin-bottom: 0;
   border-bottom: 1px solid var(--border);
   overflow-x: auto;
+  overflow-y: hidden; /* tab buttons use margin-bottom:-1px; without this the 1px overflow shows a vertical scrollbar */
   scrollbar-width: thin;
 }
 .tab-btn {
