@@ -95,9 +95,16 @@ def mounts_page(
     request: Request,
     fs_type: str = "",
     is_network: str = "",
+    search: str = "",
+    show_hidden: str = "",
     db: Session = Depends(get_db),
 ):
     q = db.query(Mount)
+    if show_hidden != "yes":
+        q = q.filter(Mount.is_hidden == False)
+    if search.strip():
+        term = f"%{search.strip()}%"
+        q = q.filter((Mount.mount_point.ilike(term)) | (Mount.label.ilike(term)) | (Mount.device.ilike(term)))
     if fs_type:
         q = q.filter(Mount.fs_type == fs_type)
     if is_network == "yes":
@@ -153,6 +160,8 @@ def mounts_page(
         "all_fs_types": all_fs_types,
         "fs_type": fs_type,
         "is_network": is_network,
+        "search": search,
+        "show_hidden": show_hidden,
         "mounted_paths": mounted_paths,
         "stale_paths": stale_paths,
         "indexed_bytes": indexed_bytes,

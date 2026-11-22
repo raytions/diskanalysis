@@ -831,6 +831,7 @@ def unmount_fs(mount_id: int, request: Request, db: Session = Depends(get_db), _
 
 class MountPatchRequest(BaseModel):
     label: str | None = None
+    is_hidden: bool | None = None
 
 
 @router.patch("/mounts/{mount_id}")
@@ -841,6 +842,8 @@ def patch_mount(mount_id: int, req: MountPatchRequest, request: Request,
         raise HTTPException(status_code=404, detail="Mount not found")
     if req.label is not None:
         m.label = req.label.strip()
+    if req.is_hidden is not None:
+        m.is_hidden = req.is_hidden
     db.commit()
     return ok(MountSchema.model_validate(m).model_dump())
 

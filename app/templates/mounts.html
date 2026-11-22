@@ -170,6 +170,12 @@
 {% endif %}
 
 <form class="filter-bar" method="get" action="/mounts" id="filter-form" style="align-items:center;">
+  <label class="filter-label">Search
+    <input type="search" name="search" value="{{ search }}" placeholder="Path, label, or device" />
+  </label>
+  {% if not auth_enabled or is_admin %}
+  <label class="filter-label"><input type="checkbox" name="show_hidden" value="yes" {% if show_hidden == 'yes' %}checked{% endif %} onchange="this.form.submit()"> Show hidden</label>
+  {% endif %}
   <label class="filter-label">Filesystem
     <select name="fs_type" onchange="this.form.submit()">
       <option value="">All</option>
@@ -266,6 +272,7 @@
         data-device="{{ m.device }}"
         data-is_sshfs="{{ '1' if m.fs_type == 'fuse.sshfs' else '0' }}"
         data-is_mounted="{{ '1' if is_mounted else '0' }}"
+        data-is_hidden="{{ '1' if m.is_hidden else '0' }}"
         onclick="handleRowClick(event, this)"
         oncontextmenu="showCtxMenu(event, {{ m.id }}, {{ ('`' + m.label + '`') if m.label else '``' }})">
       <td title="{{ m.mount_point }}">
@@ -354,6 +361,7 @@
 <!-- Right-click context menu -->
 <div id="mnt-ctx-menu" style="display:none;position:fixed;z-index:9000;background:var(--surface);border:1px solid var(--border);border-radius:7px;box-shadow:0 4px 18px rgba(0,0,0,.18);padding:.3rem 0;min-width:160px;font-size:.87rem;">
   <div class="ctx-item" onclick="_ctxAction('edit')">Edit label</div>
+  {% if not auth_enabled or is_admin %}<div class="ctx-item" onclick="_ctxAction('hide')" id="ctx-hide-item">Hide</div>{% endif %}
   <div class="ctx-item" onclick="_ctxAction('select')" id="ctx-select-item">Select</div>
   <div class="ctx-divider"></div>
   <div class="ctx-item" onclick="_ctxAction('rescan')">Rescan</div>
@@ -809,6 +817,8 @@ function showCtxMenu(e, mountId, label) {
   _ctxLabel = label || '';
   const row = document.querySelector(`#mounts-tbody tr[data-id="${mountId}"]`);
   document.getElementById('ctx-select-item').textContent = selected.has(String(mountId)) ? 'Deselect' : 'Select';
+  const hideItem = document.getElementById('ctx-hide-item');
+  if (hideItem) hideItem.textContent = row && row.dataset.is_hidden === '1' ? 'Restore' : 'Hide';
   const remountItem = document.getElementById('ctx-remount-item');
   if (remountItem) remountItem.style.display = mountTargetFromRow(row) ? '' : 'none';
   const menu = _ctxMenu;
@@ -848,6 +858,11 @@ async function _ctxAction(action) {
     });
     if ((await r.json()).ok) location.reload();
     else alert('Failed to update label.');
+  } else if (action === 'hide') {
+    const row = document.querySelector(`#mounts-tbody tr[data-id="${id}"]`);
+    const wasHidden = row && row.dataset.is_hidden === '1';
+    const r = await fetch('/api/mounts/' + id, {method:'PATCH', headers:{'Content-Type':'application/json'}, body:JSON.stringify({is_hidden: !wasHidden})});
+    if ((await r.json()).ok) location.reload(); else alert('Failed to ' + (wasHidden ? 'restore' : 'hide') + ' mount.');
   } else if (action === 'rescan') {
     const r = await fetch('/api/scans', {
       method: 'POST', headers: {'Content-Type': 'application/json'},

@@ -60,6 +60,10 @@ def _migrate(eng):
     """Apply any additive schema changes not handled by create_all."""
     from sqlalchemy import text
     with eng.connect() as conn:
+        mount_cols = {row[1] for row in conn.execute(text("PRAGMA table_info(mounts)"))}
+        if "is_hidden" not in mount_cols:
+            conn.execute(text("ALTER TABLE mounts ADD COLUMN is_hidden BOOLEAN NOT NULL DEFAULT 0"))
+            conn.commit()
         existing = {row[1] for row in conn.execute(text("PRAGMA table_info(files)"))}
         if "uid" not in existing:
             conn.execute(text("ALTER TABLE files ADD COLUMN uid INTEGER"))
